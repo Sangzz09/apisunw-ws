@@ -10,8 +10,8 @@ const WS_URL = "wss://websocket.azhkthg1.net/websocket?token=";
 
 // --- CẤU HÌNH TÀI KHOẢN & TOKEN ---
 const ACCOUNT = {
-    username: "SC_minhsangpro",       // <-- Tài khoản
-    password: "YOUR_PASSWORD_HERE",   // <-- Mật khẩu
+    username: "Msangzz09",       // <-- Tài khoản
+    password: "sang09",   // <-- Mật khẩu
     loginUrl: "https://web.sunwin.ec/api/auth/login", // URL đăng nhập
 };
 
