@@ -1,6 +1,6 @@
-const WebSocket = require('ws');
-const express = require('express');
-const cors = require('cors');
+import WebSocket from 'ws';
+import express from 'express';
+import cors from 'cors';
 
 // ============================================================
 // --- CẤU HÌNH ---
@@ -21,7 +21,7 @@ const PING_INTERVAL = 15000;
 const ACCOUNT = {
     username: "Msangzz09",
     password: "sang09",
-    loginUrl: "https://web.sunwin.af/api/auth/login",
+    loginUrl: "https://web.sunwin.ec/api/auth/login",
 };
 
 // --- TOKEN HIỆN TẠI (fallback nếu chưa login được) ---
@@ -51,7 +51,6 @@ async function refreshToken() {
     console.log("\n🔄 Đang lấy token mới...");
 
     try {
-        const fetch = (await import('node-fetch')).default;
         const response = await fetch(ACCOUNT.loginUrl, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
