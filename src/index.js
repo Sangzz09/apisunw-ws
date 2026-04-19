@@ -21,7 +21,7 @@ const PING_INTERVAL = 15000;
 const ACCOUNT = {
     username: "Msangzz09",
     password: "sang09",
-    loginUrl: "https://web.sunwin.ec/api/auth/login",
+    loginUrl: "https://web.sunwin.af/api/auth/login",
 };
 
 // --- TOKEN HIỆN TẠI (fallback nếu chưa login được) ---
