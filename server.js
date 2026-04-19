@@ -719,68 +719,112 @@ class AdvancedAI {
         this.history = [];
         this.weights = {};
         this.performance = {};
-        this.lastPreds = {};
+        // pendingPreds: dự đoán cho phiên KẾ TIẾP (chưa có kết quả)
+        // khi kết quả phiên đó về → so sánh → cập nhật weight
+        this.pendingPreds = {};
         ALGORITHMS.forEach(a => {
             this.weights[a.id] = 1.0;
             this.performance[a.id] = { correct: 0, total: 0, recent: [], streak: 0, name: a.name };
-            this.lastPreds[a.id] = null;
+            this.pendingPreds[a.id] = null;
         });
     }
 
+    // Gọi khi có kết quả phiên mới:
+    // 1. Đánh giá pendingPreds (dự đoán của phiên này)
+    // 2. Push kết quả vào history
+    // 3. Chạy predict cho phiên tiếp theo → lưu vào pendingPreds
     addResult(record) {
         const parsed = parseRecord(record);
-        if (this.history.length >= 15) this._updatePerformance(parsed.tx);
+
+        // Bước 1: Cập nhật weight dựa trên pendingPreds vs kết quả thực
+        if (this.history.length >= 15) {
+            this._updatePerformance(parsed.tx);
+        }
+
+        // Bước 2: Lưu kết quả
         this.history.push(parsed);
         if (this.history.length > 500) this.history = this.history.slice(-400);
+
+        // Bước 3: Chạy từng algo ngay sau khi có kết quả mới → lưu pending cho phiên sau
+        ALGORITHMS.forEach(a => {
+            try {
+                const p = a.fn(this.history);
+                this.pendingPreds[a.id] = (p === 'T' || p === 'X') ? p : null;
+            } catch (_) {
+                this.pendingPreds[a.id] = null;
+            }
+        });
+
         return parsed;
     }
 
     _updatePerformance(actualTx) {
         ALGORITHMS.forEach(a => {
             const perf = this.performance[a.id];
-            const pred = this.lastPreds[a.id];
-            if (!pred) return;
+            const pred = this.pendingPreds[a.id];
+            if (!pred) return; // algo không đưa ra dự đoán → bỏ qua
+
             const correct = pred === actualTx;
             perf.correct += correct ? 1 : 0;
             perf.total++;
             perf.streak = correct ? perf.streak + 1 : 0;
             perf.recent.push(correct ? 1 : 0);
-            if (perf.recent.length > 10) perf.recent.shift();
-            if (perf.total >= 15) {
+            if (perf.recent.length > 15) perf.recent.shift();
+
+            if (perf.total >= 10) {
                 const acc = perf.correct / perf.total;
-                const recAcc = perf.recent.reduce((a, b) => a + b) / perf.recent.length;
-                let w = Math.max(0.1, Math.min(2.0, (acc * 0.6 + recAcc * 0.3 + perf.streak * 0.03) * 1.8));
-                this.weights[a.id] = this.weights[a.id] * 0.8 + w * 0.2;
+                const recAcc = perf.recent.reduce((a, b) => a + b, 0) / perf.recent.length;
+                // Weight tăng khi chính xác cao, giảm khi sai liên tục
+                const targetW = Math.max(0.05, Math.min(2.5,
+                    acc * 0.5 + recAcc * 0.4 + Math.min(perf.streak, 5) * 0.04
+                ));
+                this.weights[a.id] = this.weights[a.id] * 0.75 + targetW * 0.25;
             }
         });
-        ALGORITHMS.forEach(a => { this.lastPreds[a.id] = null; });
     }
 
+    // predict() đọc pendingPreds hiện tại (đã được tính sau kết quả gần nhất)
     predict() {
         if (this.history.length < 15) {
             return { prediction: 'Tài', rawPrediction: 'T', confidence: 0.5, algorithms: 0 };
         }
+
         const preds = [];
         ALGORITHMS.forEach(a => {
-            try {
-                const p = a.fn(this.history);
-                if (p === 'T' || p === 'X') {
-                    preds.push({ id: a.id, prediction: p, weight: this.weights[a.id] });
-                    this.lastPreds[a.id] = p;
-                }
-            } catch (_) {}
+            const p = this.pendingPreds[a.id];
+            if (p === 'T' || p === 'X') {
+                preds.push({ id: a.id, prediction: p, weight: this.weights[a.id] });
+            }
         });
+
+        if (preds.length === 0) {
+            // Fallback: chạy lại tất cả algo không cache
+            ALGORITHMS.forEach(a => {
+                try {
+                    const p = a.fn(this.history);
+                    if (p === 'T' || p === 'X') {
+                        preds.push({ id: a.id, prediction: p, weight: this.weights[a.id] });
+                    }
+                } catch (_) {}
+            });
+        }
+
         if (preds.length === 0) {
             return { prediction: 'Tài', rawPrediction: 'T', confidence: 0.5, algorithms: 0 };
         }
+
         const votes = { T: 0, X: 0 };
         preds.forEach(p => { votes[p.prediction] += p.weight; });
         const totalW = votes.T + votes.X;
-        const final = votes.T >= votes.X ? 'T' : 'X';
+        const final = votes.T > votes.X ? 'T' : 'X';
         const consensus = preds.filter(p => p.prediction === final).length / preds.length;
-        const confidence = Math.max(0.5, Math.min(0.98,
-            (Math.max(votes.T, votes.X) / totalW) * 0.7 + consensus * 0.3
+
+        // Confidence thực sự dựa trên chênh lệch vote + mức đồng thuận
+        const voteRatio = Math.max(votes.T, votes.X) / totalW;
+        const confidence = Math.max(0.51, Math.min(0.96,
+            voteRatio * 0.65 + consensus * 0.35
         ));
+
         return {
             prediction: final === 'T' ? 'Tài' : 'Xỉu',
             rawPrediction: final,
@@ -791,6 +835,15 @@ class AdvancedAI {
 
     loadHistory(arr) {
         this.history = arr.map(parseRecord).sort((a, b) => a.session - b.session);
+        // Khởi tạo pendingPreds ngay sau khi load lịch sử
+        ALGORITHMS.forEach(a => {
+            try {
+                const p = a.fn(this.history);
+                this.pendingPreds[a.id] = (p === 'T' || p === 'X') ? p : null;
+            } catch (_) {
+                this.pendingPreds[a.id] = null;
+            }
+        });
         console.log(`📊 Đã tải ${this.history.length} lịch sử vào AI`);
     }
 
