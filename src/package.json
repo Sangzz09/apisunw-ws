@@ -1,10 +1,12 @@
 {
   "name": "sun-ai-server",
   "version": "1.0.0",
+  "description": "Sun Win Tai Xiu AI Prediction Server",
+  "main": "server.js",
   "type": "module",
-  "main": "sun_ai.js",
   "scripts": {
-    "start": "node sun_ai.js"
+    "start": "node server.js",
+    "dev": "node --watch server.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
