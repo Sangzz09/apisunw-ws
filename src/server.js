@@ -88,7 +88,7 @@ let apiResponseData = {
     "phien": null, "xuc_xac": [], "phien_hien_tai": null,
     "du_doan": "đang tính...", "do_tin_cay": "50%",
     "loai_cau": "đang thu thập...", "pattern": "",
-    "chi_tiet_cau": {}, "dev": "@sewdangcap"
+    "chi_tiet_cau": {}, "cong_thuc_68gb": null, "dev": "@sewdangcap"
 };
 
 // ============================================================
@@ -119,55 +119,320 @@ function calcEMA(arr, period) {
 }
 
 // ============================================================
+// --- CÔNG THỨC 68GB BÀN XANH ---
+// Tích hợp toàn bộ 15 quy tắc từ công thức thủ công
+// ============================================================
+function congThuc68GB(history) {
+    if (history.length < 3) return null;
+
+    const n = history.length;
+    const totals = history.map(h => h.total);
+    const txArr  = history.map(h => h.tx);
+
+    const t0 = totals[n - 1]; // tay mới nhất
+    const t1 = totals[n - 2];
+    const t2 = n >= 3 ? totals[n - 3] : null;
+    const t3 = n >= 4 ? totals[n - 4] : null;
+
+    const tx0 = txArr[n - 1];
+    const tx1 = txArr[n - 2];
+    const tx2 = n >= 3 ? txArr[n - 3] : null;
+    const tx3 = n >= 4 ? txArr[n - 4] : null;
+
+    const isKep    = t0 === t1;
+    const isTriple = isKep && n >= 3 && t0 === t2;
+
+    // -------------------------------------------------------
+    // RULE 1: Cầu bệt mà tổng dao động (ví dụ 6-7-8-5-6) → bẻ
+    // Phát hiện: chuỗi xỉu liên tiếp nhưng tổng không ổn định
+    // -------------------------------------------------------
+    if (n >= 5) {
+        const streak5 = txArr.slice(-5);
+        const allSameTx = streak5.every(v => v === streak5[0]);
+        if (allSameTx) {
+            const tot5 = totals.slice(-5);
+            const maxT = Math.max(...tot5);
+            const minT = Math.min(...tot5);
+            if ((maxT - minT) >= 4) { // dao động ≥ 4 điểm
+                const opposite = tx0 === 'T' ? 'X' : 'T';
+                return {
+                    rule: 1, duDoan: opposite, doTinCay: 0.67,
+                    moTa: `CT68 R1: Cầu bệt dao động mạnh (${minT}-${maxT}) → Bẻ ${opposite === 'T' ? 'Tài' : 'Xỉu'}`
+                };
+            }
+        }
+    }
+
+    // -------------------------------------------------------
+    // RULE 2: Tổng tay đầu bệt ≥ tổng hiện tại → bẻ cao
+    // Tìm điểm bắt đầu cầu bệt hiện tại
+    // -------------------------------------------------------
+    {
+        let betStart = n - 1;
+        while (betStart > 0 && txArr[betStart - 1] === tx0) betStart--;
+        const betLen = n - betStart;
+        if (betLen >= 3) {
+            const openingTotal = totals[betStart];
+            if (openingTotal >= t0 && betLen >= 3) {
+                const opposite = tx0 === 'T' ? 'X' : 'T';
+                return {
+                    rule: 2, duDoan: opposite, doTinCay: 0.65,
+                    moTa: `CT68 R2: Tổng đầu cầu (${openingTotal}) ≥ hiện tại (${t0}), bệt ${betLen} tay → Bẻ`
+                };
+            }
+        }
+    }
+
+    // -------------------------------------------------------
+    // RULE 3: Kép 11-11 sau cầu xỉu → Tài
+    //         Tổng 16-17 → Bẻ xỉu
+    // -------------------------------------------------------
+    if (isKep && t0 === 11 && tx2 === 'X') {
+        return {
+            rule: 3, duDoan: 'T', doTinCay: 0.68,
+            moTa: `CT68 R3: Kép 11-11 sau xỉu → Tài`
+        };
+    }
+    if ((t0 === 16 || t0 === 17) && tx0 === 'T') {
+        return {
+            rule: '3b', duDoan: 'X', doTinCay: 0.72,
+            moTa: `CT68 R3b: Tổng Tài ${t0} (cao bất thường) → Bẻ Xỉu`
+        };
+    }
+
+    // -------------------------------------------------------
+    // RULE 4: 2 Xỉu liên tiếp, 1 chẵn 1 lẻ → tay tiếp Tài
+    // -------------------------------------------------------
+    if (tx0 === 'X' && tx1 === 'X') {
+        const t0Even = t0 % 2 === 0;
+        const t1Even = t1 % 2 === 0;
+        if (t0Even !== t1Even) {
+            return {
+                rule: 4, duDoan: 'T', doTinCay: 0.66,
+                moTa: `CT68 R4: 2 Xỉu chẵn-lẻ (${t1} & ${t0}) → Tài`
+            };
+        }
+    }
+
+    // -------------------------------------------------------
+    // RULE 5: Nhỏ → Cao → Nhỏ (sóng đỉnh) → Tài
+    // Ví dụ: 11-11-17-9 → bẻ lên tài
+    // -------------------------------------------------------
+    if (t3 !== null) {
+        const peak = Math.max(t3, t2, t1);
+        const valleyBefore = Math.min(t3, t2);
+        if (peak >= 14 && valleyBefore <= 11 && t0 <= 10) {
+            return {
+                rule: 5, duDoan: 'T', doTinCay: 0.66,
+                moTa: `CT68 R5: Sóng nhỏ→cao(${peak})→nhỏ(${t0}) → Bẻ Tài`
+            };
+        }
+    }
+
+    // -------------------------------------------------------
+    // RULE 6: Cầu 1-1 mà tổng đầu TO HƠN tổng mới → bẻ
+    // Ví dụ: 9-13-8 → xỉu (13>8)
+    // -------------------------------------------------------
+    if (t2 !== null) {
+        const isZigzag3 = tx0 !== tx1 && tx1 !== tx2;
+        if (isZigzag3) {
+            const headTotal = t2; // tổng tay đầu chuỗi 1-1
+            if (headTotal > t0 + 3) {
+                return {
+                    rule: 6, duDoan: 'X', doTinCay: 0.65,
+                    moTa: `CT68 R6: Cầu 1-1, đầu (${headTotal}) >> mới (${t0}) → Xỉu`
+                };
+            }
+        }
+    }
+
+    // -------------------------------------------------------
+    // RULE 7: Xỉu lùi tổng → đi tiếp Xỉu
+    // Ví dụ: 8-7 → tiếp Xỉu
+    // -------------------------------------------------------
+    if (tx0 === 'X' && tx1 === 'X' && t0 < t1) {
+        return {
+            rule: 7, duDoan: 'X', doTinCay: 0.63,
+            moTa: `CT68 R7: Xỉu lùi (${t1}→${t0}) → Tiếp Xỉu`
+        };
+    }
+
+    // -------------------------------------------------------
+    // RULE 8: Tài lùi tổng → bẻ Xỉu
+    // Ví dụ: 14-11 → bẻ xỉu
+    // -------------------------------------------------------
+    if (tx0 === 'T' && tx1 === 'T' && t0 < t1) {
+        return {
+            rule: 8, duDoan: 'X', doTinCay: 0.66,
+            moTa: `CT68 R8: Tài lùi (${t1}→${t0}) → Bẻ Xỉu`
+        };
+    }
+
+    // -------------------------------------------------------
+    // RULE 9: Tổng tiến (xỉu→tài hướng) → đánh Tài tiếp
+    // Ví dụ: 11-14 → Tài tiếp
+    // -------------------------------------------------------
+    if (tx0 === 'T' && tx1 === 'X' && t0 > t1 && t0 > 11) {
+        return {
+            rule: 9, duDoan: 'T', doTinCay: 0.63,
+            moTa: `CT68 R9: Tổng tiến mạnh (${t1}→${t0}) → Tài`
+        };
+    }
+
+    // -------------------------------------------------------
+    // RULE 10: Tài vị liên tiếp (hơn kém 1) → bẻ Xỉu
+    // Ví dụ: 13-14 → bẻ Xỉu
+    // -------------------------------------------------------
+    if (tx0 === 'T' && tx1 === 'T' && Math.abs(t0 - t1) === 1) {
+        // Rule 14 mở rộng: nếu chuỗi tài kéo dài → theo 2 tay rồi bẻ
+        if (tx2 === 'T') {
+            return {
+                rule: '10b', duDoan: 'X', doTinCay: 0.72,
+                moTa: `CT68 R10b: Tài vị liền 3+ tay (${t2}-${t1}-${t0}) → Bẻ Xỉu chắc`
+            };
+        }
+        return {
+            rule: 10, duDoan: 'X', doTinCay: 0.68,
+            moTa: `CT68 R10: Tài vị liền (${t1}-${t0}) → Bẻ Xỉu`
+        };
+    }
+
+    // -------------------------------------------------------
+    // RULE 11: Tài cách 1 vị (hơn kém 2) → đánh Tài tiếp
+    // Ví dụ: 12-14 → Tài tiếp
+    // -------------------------------------------------------
+    if (tx0 === 'T' && tx1 === 'T' && Math.abs(t0 - t1) === 2) {
+        return {
+            rule: 11, duDoan: 'T', doTinCay: 0.63,
+            moTa: `CT68 R11: Tài cách 1 vị (${t1}-${t0}) → Tiếp Tài`
+        };
+    }
+
+    // -------------------------------------------------------
+    // RULE 12: Kép Xỉu
+    // - Chẵn (8-8) → tiếp Xỉu
+    // - Lẻ (7-7) → bẻ Tài
+    // - Ba giống (6-6-6) → bẻ Tài
+    // - Ba 10 đặc biệt → tiếp Xỉu
+    // -------------------------------------------------------
+    if (isKep && tx0 === 'X') {
+        if (isTriple) {
+            if (t0 === 10) {
+                return {
+                    rule: '12-triple10', duDoan: 'X', doTinCay: 0.72,
+                    moTa: `CT68 R12: Ba 10 liên tiếp (đặc biệt) → Tiếp Xỉu`
+                };
+            }
+            return {
+                rule: '12-triple', duDoan: 'T', doTinCay: 0.71,
+                moTa: `CT68 R12: Ba Xỉu ${t0} liên tiếp → Bẻ Tài`
+            };
+        }
+        if (t0 % 2 === 0) {
+            return {
+                rule: '12-even', duDoan: 'X', doTinCay: 0.67,
+                moTa: `CT68 R12: Kép Xỉu chẵn (${t0}-${t0}) → Tiếp Xỉu`
+            };
+        } else {
+            return {
+                rule: '12-odd', duDoan: 'T', doTinCay: 0.67,
+                moTa: `CT68 R12: Kép Xỉu lẻ (${t0}-${t0}) → Bẻ Tài`
+            };
+        }
+    }
+
+    // -------------------------------------------------------
+    // RULE 13: Kép Tài (ngược với Xỉu)
+    // - Chẵn (14-14) → bẻ Xỉu
+    // - Lẻ (13-13) → tiếp Tài
+    // - Ba giống → bẻ Xỉu
+    // -------------------------------------------------------
+    if (isKep && tx0 === 'T') {
+        if (isTriple) {
+            return {
+                rule: '13-triple', duDoan: 'X', doTinCay: 0.71,
+                moTa: `CT68 R13: Ba Tài ${t0} liên tiếp → Bẻ Xỉu`
+            };
+        }
+        if (t0 % 2 === 0) {
+            return {
+                rule: '13-even', duDoan: 'X', doTinCay: 0.69,
+                moTa: `CT68 R13: Kép Tài chẵn (${t0}-${t0}) → Bẻ Xỉu`
+            };
+        } else {
+            return {
+                rule: '13-odd', duDoan: 'T', doTinCay: 0.67,
+                moTa: `CT68 R13: Kép Tài lẻ (${t0}-${t0}) → Tiếp Tài`
+            };
+        }
+    }
+
+    // -------------------------------------------------------
+    // RULE 14: Tài vị liên tiếp, nếu tiếp tục Tài → theo 2 tay rồi bẻ
+    // Ví dụ ra 13-14-13 → theo thêm 2 tay Tài rồi bẻ
+    // -------------------------------------------------------
+    if (tx0 === 'T' && tx1 === 'T' && tx2 === 'T' && t2 !== null) {
+        const taiCount = txArr.slice(-6).filter(v => v === 'T').length;
+        if (taiCount >= 5) {
+            return {
+                rule: 14, duDoan: 'X', doTinCay: 0.70,
+                moTa: `CT68 R14: Tài liên tục dài → Bẻ Xỉu (đủ 2 tay theo)`
+            };
+        }
+    }
+
+    // -------------------------------------------------------
+    // RULE 15: Đối xứng tổng (a-b-a) → Bệt Tài 3 tay
+    // Ví dụ: 7-11-7 → bệt Tài 3 tay
+    // -------------------------------------------------------
+    if (t2 !== null && t2 === t0) {
+        const midIsDiff = tx1 !== tx0;
+        if (midIsDiff) {
+            return {
+                rule: 15, duDoan: 'T', doTinCay: 0.68,
+                moTa: `CT68 R15: Đối xứng (${t2}-${t1}-${t0}) → Bệt Tài`
+            };
+        }
+    }
+
+    return null; // Không khớp quy tắc nào
+}
+
+// ============================================================
 // --- PHÂN TÍCH CẦU CHUYÊN SÂU ---
 // ============================================================
-
-/**
- * Phát hiện toàn bộ loại cầu từ chuỗi T/X
- * Trả về object chi tiết loại cầu đang chạy
- */
 function phanTichCau(tx) {
     if (tx.length < 5) return { loaiCau: 'Chưa đủ dữ liệu', duDoan: null, doTinCay: 0.5 };
 
     const results = [];
 
-    // --- 1. CẦU BỆT (streak liên tiếp) ---
     const cauBet = phatHienCauBet(tx);
     if (cauBet) results.push(cauBet);
 
-    // --- 2. CẦU 1-1 (zigzag xen kẽ) ---
     const cau11 = phatHienCau11(tx);
     if (cau11) results.push(cau11);
 
-    // --- 3. CẦU 2-2, 3-3, N-N (nhóm đều) ---
     const cauNhom = phatHienCauNhom(tx);
     if (cauNhom) results.push(cauNhom);
 
-    // --- 4. CẦU PHỨC (2-1, 3-1, 1-2, v.v.) ---
     const cauPhuc = phatHienCauPhuc(tx);
     if (cauPhuc) results.push(cauPhuc);
 
-    // --- 5. CẦU LỆCH (T hoặc X áp đảo) ---
     const cauLech = phatHienCauLech(tx);
     if (cauLech) results.push(cauLech);
 
-    // --- 6. CẦU ĐẢO (sau chuỗi dài đổi chiều) ---
     const cauDao = phatHienCauDao(tx);
     if (cauDao) results.push(cauDao);
 
-    // --- 7. CẦU SÓNG (tăng giảm luân phiên theo nhịp) ---
     const cauSong = phatHienCauSong(tx);
     if (cauSong) results.push(cauSong);
 
-    // --- 8. CẦU TUẦN HOÀN (chu kỳ lặp lại) ---
     const cauTuanHoan = phatHienCauTuanHoan(tx);
     if (cauTuanHoan) results.push(cauTuanHoan);
 
-    // --- 9. CẦU ĐỘT PHÁ (phá vỡ cầu cũ) ---
     const cauDotPha = phatHienCauDotPha(tx);
     if (cauDotPha) results.push(cauDotPha);
 
-    // --- 10. CẦU ĐỐI XỨNG ---
     const cauDoiXung = phatHienCauDoiXung(tx);
     if (cauDoiXung) results.push(cauDoiXung);
 
@@ -175,14 +440,10 @@ function phanTichCau(tx) {
         return { loaiCau: 'Hỗn loạn', duDoan: duDoanTheoThongKe(tx), doTinCay: 0.52 };
     }
 
-    // Chọn cầu có độ tin cậy cao nhất
     results.sort((a, b) => b.doTinCay - a.doTinCay);
     return results[0];
 }
 
-// --------------------------------
-// CẦU BỆT: TTTT... hoặc XXXX...
-// --------------------------------
 function phatHienCauBet(tx) {
     const last = tx[tx.length - 1];
     let streak = 1;
@@ -190,10 +451,8 @@ function phatHienCauBet(tx) {
         if (tx[i] === last) streak++;
         else break;
     }
-
     if (streak < 2) return null;
 
-    // Phân tích lịch sử cầu bệt để xem thường dài bao nhiêu
     const betHistory = [];
     let cur = 1;
     for (let i = 1; i < tx.length; i++) {
@@ -206,38 +465,27 @@ function phatHienCauBet(tx) {
         ? betHistory.slice(-10).reduce((a, b) => a + b, 0) / Math.min(betHistory.length, 10)
         : 3;
 
-    // Xác suất tiếp tục hay đảo dựa trên độ dài trung bình
     let duDoan, doTinCay, moTa;
     if (streak >= avgBetLen + 1) {
-        // Vượt quá trung bình → có thể đảo
         duDoan = last === 'T' ? 'X' : 'T';
         doTinCay = Math.min(0.75, 0.55 + (streak - avgBetLen) * 0.04);
         moTa = `Cầu bệt ${last === 'T' ? 'Tài' : 'Xỉu'} ${streak} (>TB ${avgBetLen.toFixed(1)}) → Sắp đảo`;
     } else if (streak >= 4) {
-        // Cầu bệt dài → khả năng break tăng
         duDoan = last === 'T' ? 'X' : 'T';
         doTinCay = 0.58 + streak * 0.02;
         moTa = `Cầu bệt dài ${streak} → Nghiêng đảo`;
     } else {
-        // Cầu bệt ngắn → tiếp tục
         duDoan = last;
         doTinCay = 0.55 + streak * 0.03;
         moTa = `Cầu bệt ${last === 'T' ? 'Tài' : 'Xỉu'} ${streak} → Tiếp tục`;
     }
 
     return {
-        loaiCau: `Cầu Bệt-${streak}`,
-        moTa,
-        duDoan,
-        doTinCay: Math.min(0.82, doTinCay),
-        streak,
-        avgBetLen: avgBetLen.toFixed(1)
+        loaiCau: `Cầu Bệt-${streak}`, moTa, duDoan,
+        doTinCay: Math.min(0.82, doTinCay), streak, avgBetLen: avgBetLen.toFixed(1)
     };
 }
 
-// --------------------------------
-// CẦU 1-1: TXTXTX hoặc XTXTXT
-// --------------------------------
 function phatHienCau11(tx) {
     const recent = tx.slice(-10);
     let zigzagLen = 1;
@@ -245,27 +493,18 @@ function phatHienCau11(tx) {
         if (recent[i] !== recent[i + 1]) zigzagLen++;
         else break;
     }
-
     if (zigzagLen < 4) return null;
-
     const last = recent[recent.length - 1];
-    // Zigzag → đảo liên tục
-    const duDoan = last === 'T' ? 'X' : 'T';
-
     return {
         loaiCau: `Cầu 1-1 (Xen kẽ)`,
         moTa: `Cầu 1-1 dài ${zigzagLen} phiên → Tiếp tục xen kẽ`,
-        duDoan,
+        duDoan: last === 'T' ? 'X' : 'T',
         doTinCay: Math.min(0.80, 0.60 + zigzagLen * 0.025),
         zigzagLen
     };
 }
 
-// --------------------------------
-// CẦU N-N: 2-2, 3-3, 4-4...
-// --------------------------------
 function phatHienCauNhom(tx) {
-    // Tách thành các nhóm liên tiếp
     const groups = [];
     let cur = { val: tx[0], len: 1 };
     for (let i = 1; i < tx.length; i++) {
@@ -273,38 +512,24 @@ function phatHienCauNhom(tx) {
         else { groups.push({ ...cur }); cur = { val: tx[i], len: 1 }; }
     }
     groups.push(cur);
-
     if (groups.length < 4) return null;
 
-    // Lấy 6 nhóm gần nhất
     const recentGroups = groups.slice(-6);
     const lens = recentGroups.map(g => g.len);
 
-    // Kiểm tra 2-2
     if (lens.slice(-4).every(l => l === 2)) {
         const last = tx[tx.length - 1];
-        const posInGroup = lens[lens.length - 1];
         const curGroupLen = recentGroups[recentGroups.length - 1].len;
-        if (curGroupLen < 2) {
-            return { loaiCau: 'Cầu 2-2', moTa: 'Cầu 2-2 → Tiếp tục', duDoan: last, doTinCay: 0.70, nhom: '2-2' };
-        } else {
-            const nextVal = last === 'T' ? 'X' : 'T';
-            return { loaiCau: 'Cầu 2-2', moTa: 'Cầu 2-2 → Đảo nhóm', duDoan: nextVal, doTinCay: 0.72, nhom: '2-2' };
-        }
+        if (curGroupLen < 2) return { loaiCau: 'Cầu 2-2', moTa: 'Cầu 2-2 → Tiếp tục', duDoan: last, doTinCay: 0.70, nhom: '2-2' };
+        return { loaiCau: 'Cầu 2-2', moTa: 'Cầu 2-2 → Đảo nhóm', duDoan: last === 'T' ? 'X' : 'T', doTinCay: 0.72, nhom: '2-2' };
     }
-
-    // Kiểm tra 3-3
     if (lens.slice(-4).every(l => l === 3)) {
         const last = tx[tx.length - 1];
         const curGroup = recentGroups[recentGroups.length - 1];
-        if (curGroup.len < 3) {
-            return { loaiCau: 'Cầu 3-3', moTa: 'Cầu 3-3 → Tiếp tục', duDoan: last, doTinCay: 0.72, nhom: '3-3' };
-        } else {
-            return { loaiCau: 'Cầu 3-3', moTa: 'Cầu 3-3 → Đảo nhóm', duDoan: last === 'T' ? 'X' : 'T', doTinCay: 0.73, nhom: '3-3' };
-        }
+        if (curGroup.len < 3) return { loaiCau: 'Cầu 3-3', moTa: 'Cầu 3-3 → Tiếp tục', duDoan: last, doTinCay: 0.72, nhom: '3-3' };
+        return { loaiCau: 'Cầu 3-3', moTa: 'Cầu 3-3 → Đảo nhóm', duDoan: last === 'T' ? 'X' : 'T', doTinCay: 0.73, nhom: '3-3' };
     }
 
-    // Kiểm tra N-N tổng quát
     const recentLens = lens.slice(-4);
     const allSame = recentLens.every(l => l === recentLens[0]);
     if (allSame && recentLens[0] >= 2) {
@@ -312,14 +537,10 @@ function phatHienCauNhom(tx) {
         const last = tx[tx.length - 1];
         const curGroup = recentGroups[recentGroups.length - 1];
         const loai = `Cầu ${n}-${n}`;
-        if (curGroup.len < n) {
-            return { loaiCau: loai, moTa: `${loai} → Tiếp tục (còn ${n - curGroup.len})`, duDoan: last, doTinCay: 0.68, nhom: `${n}-${n}` };
-        } else {
-            return { loaiCau: loai, moTa: `${loai} → Đảo nhóm`, duDoan: last === 'T' ? 'X' : 'T', doTinCay: 0.70, nhom: `${n}-${n}` };
-        }
+        if (curGroup.len < n) return { loaiCau: loai, moTa: `${loai} → Tiếp tục (còn ${n - curGroup.len})`, duDoan: last, doTinCay: 0.68, nhom: `${n}-${n}` };
+        return { loaiCau: loai, moTa: `${loai} → Đảo nhóm`, duDoan: last === 'T' ? 'X' : 'T', doTinCay: 0.70, nhom: `${n}-${n}` };
     }
 
-    // Cầu tăng dần: 1-2-3-4
     if (lens.length >= 4) {
         const last4 = lens.slice(-4);
         let increasing = true, decreasing = true;
@@ -329,32 +550,22 @@ function phatHienCauNhom(tx) {
         }
         if (increasing) {
             const last = tx[tx.length - 1];
-            const curLen = recentGroups[recentGroups.length - 1].len;
+            const curGroup = recentGroups[recentGroups.length - 1];
             const expectedLen = last4[last4.length - 1];
-            if (curLen < expectedLen) {
-                return { loaiCau: 'Cầu Tăng Dần', moTa: `Cầu tăng dần → Tiếp tục`, duDoan: last, doTinCay: 0.65, nhom: 'tang-dan' };
-            } else {
-                return { loaiCau: 'Cầu Tăng Dần', moTa: `Cầu tăng dần → Nhóm mới`, duDoan: last === 'T' ? 'X' : 'T', doTinCay: 0.63, nhom: 'tang-dan' };
-            }
+            if (curGroup.len < expectedLen) return { loaiCau: 'Cầu Tăng Dần', moTa: `Cầu tăng dần → Tiếp tục`, duDoan: last, doTinCay: 0.65, nhom: 'tang-dan' };
+            return { loaiCau: 'Cầu Tăng Dần', moTa: `Cầu tăng dần → Nhóm mới`, duDoan: last === 'T' ? 'X' : 'T', doTinCay: 0.63, nhom: 'tang-dan' };
         }
         if (decreasing) {
             const last = tx[tx.length - 1];
-            const curLen = recentGroups[recentGroups.length - 1].len;
+            const curGroup = recentGroups[recentGroups.length - 1];
             const expectedLen = last4[last4.length - 1];
-            if (curLen < expectedLen) {
-                return { loaiCau: 'Cầu Giảm Dần', moTa: `Cầu giảm dần → Tiếp tục`, duDoan: last, doTinCay: 0.63, nhom: 'giam-dan' };
-            } else {
-                return { loaiCau: 'Cầu Giảm Dần', moTa: `Cầu giảm dần → Nhóm mới`, duDoan: last === 'T' ? 'X' : 'T', doTinCay: 0.62, nhom: 'giam-dan' };
-            }
+            if (curGroup.len < expectedLen) return { loaiCau: 'Cầu Giảm Dần', moTa: `Cầu giảm dần → Tiếp tục`, duDoan: last, doTinCay: 0.63, nhom: 'giam-dan' };
+            return { loaiCau: 'Cầu Giảm Dần', moTa: `Cầu giảm dần → Nhóm mới`, duDoan: last === 'T' ? 'X' : 'T', doTinCay: 0.62, nhom: 'giam-dan' };
         }
     }
-
     return null;
 }
 
-// --------------------------------
-// CẦU PHỨC: 2-1, 3-1, 1-2, 3-2...
-// --------------------------------
 function phatHienCauPhuc(tx) {
     const groups = [];
     let cur = { val: tx[0], len: 1 };
@@ -363,81 +574,46 @@ function phatHienCauPhuc(tx) {
         else { groups.push({ ...cur }); cur = { val: tx[i], len: 1 }; }
     }
     groups.push(cur);
-
     if (groups.length < 6) return null;
 
-    // Lấy pattern nhóm
     const recentGroups = groups.slice(-8);
     const lens = recentGroups.map(g => g.len);
 
-    // Kiểm tra pattern 2-1 lặp lại
     const patterns = [
-        { name: '2-1', seq: [2, 1] },
-        { name: '1-2', seq: [1, 2] },
-        { name: '3-1', seq: [3, 1] },
-        { name: '1-3', seq: [1, 3] },
-        { name: '2-3', seq: [2, 3] },
-        { name: '3-2', seq: [3, 2] },
-        { name: '1-1-2', seq: [1, 1, 2] },
-        { name: '2-1-1', seq: [2, 1, 1] },
-        { name: '1-2-1', seq: [1, 2, 1] },
-        { name: '2-2-1', seq: [2, 2, 1] },
-        { name: '1-2-2', seq: [1, 2, 2] },
-        { name: '3-1-2', seq: [3, 1, 2] },
+        { name: '2-1', seq: [2, 1] }, { name: '1-2', seq: [1, 2] },
+        { name: '3-1', seq: [3, 1] }, { name: '1-3', seq: [1, 3] },
+        { name: '2-3', seq: [2, 3] }, { name: '3-2', seq: [3, 2] },
+        { name: '1-1-2', seq: [1, 1, 2] }, { name: '2-1-1', seq: [2, 1, 1] },
+        { name: '1-2-1', seq: [1, 2, 1] }, { name: '2-2-1', seq: [2, 2, 1] },
+        { name: '1-2-2', seq: [1, 2, 2] }, { name: '3-1-2', seq: [3, 1, 2] },
         { name: '2-1-3', seq: [2, 1, 3] },
     ];
 
     for (const pat of patterns) {
         const pLen = pat.seq.length;
         if (lens.length < pLen * 2) continue;
-
-        // Kiểm tra xem pLen nhóm cuối có khớp với pattern không
         let matches = 0;
         for (let i = 0; i <= lens.length - pLen; i += pLen) {
             const slice = lens.slice(i, i + pLen);
             if (slice.length === pLen && slice.every((v, j) => v === pat.seq[j])) matches++;
         }
-
         if (matches >= 2) {
             const curGroup = recentGroups[recentGroups.length - 1];
             const posInPattern = (recentGroups.length - 1) % pLen;
             const expectedLen = pat.seq[posInPattern];
             const last = tx[tx.length - 1];
-
             if (curGroup.len < expectedLen) {
-                // Vẫn trong nhóm → tiếp tục
-                return {
-                    loaiCau: `Cầu ${pat.name}`,
-                    moTa: `Cầu ${pat.name} lặp ${matches}x → Tiếp tục (${curGroup.len}/${expectedLen})`,
-                    duDoan: last,
-                    doTinCay: Math.min(0.78, 0.60 + matches * 0.04),
-                    pattern: pat.name
-                };
+                return { loaiCau: `Cầu ${pat.name}`, moTa: `Cầu ${pat.name} lặp ${matches}x → Tiếp tục (${curGroup.len}/${expectedLen})`, duDoan: last, doTinCay: Math.min(0.78, 0.60 + matches * 0.04), pattern: pat.name };
             } else {
-                // Kết thúc nhóm → sang nhóm mới
-                return {
-                    loaiCau: `Cầu ${pat.name}`,
-                    moTa: `Cầu ${pat.name} lặp ${matches}x → Đảo sang nhóm mới`,
-                    duDoan: last === 'T' ? 'X' : 'T',
-                    doTinCay: Math.min(0.78, 0.62 + matches * 0.04),
-                    pattern: pat.name
-                };
+                return { loaiCau: `Cầu ${pat.name}`, moTa: `Cầu ${pat.name} lặp ${matches}x → Đảo sang nhóm mới`, duDoan: last === 'T' ? 'X' : 'T', doTinCay: Math.min(0.78, 0.62 + matches * 0.04), pattern: pat.name };
             }
         }
     }
     return null;
 }
 
-// --------------------------------
-// CẦU LỆCH: T hoặc X áp đảo (>65%)
-// --------------------------------
 function phatHienCauLech(tx) {
-    const windows = [
-        { n: 10, weight: 0.5 },
-        { n: 20, weight: 0.3 },
-        { n: 30, weight: 0.2 }
-    ];
-
+    const windows = [{ n: 10, weight: 0.5 }, { n: 20, weight: 0.3 }, { n: 30, weight: 0.2 }];
     let tScore = 0, xScore = 0;
     for (const { n, weight } of windows) {
         if (tx.length < n) continue;
@@ -446,36 +622,16 @@ function phatHienCauLech(tx) {
         tScore += tRate * weight;
         xScore += (1 - tRate) * weight;
     }
-
     const total = tScore + xScore;
     if (total === 0) return null;
     const tRate = tScore / total;
-
-    if (tRate >= 0.68) {
-        return {
-            loaiCau: 'Cầu Lệch Tài',
-            moTa: `Tài áp đảo ${(tRate * 100).toFixed(0)}% → Bắt cầu Tài`,
-            duDoan: 'T',
-            doTinCay: Math.min(0.72, 0.55 + (tRate - 0.5) * 0.6)
-        };
-    }
-    if (tRate <= 0.32) {
-        return {
-            loaiCau: 'Cầu Lệch Xỉu',
-            moTa: `Xỉu áp đảo ${((1 - tRate) * 100).toFixed(0)}% → Bắt cầu Xỉu`,
-            duDoan: 'X',
-            doTinCay: Math.min(0.72, 0.55 + (0.5 - tRate) * 0.6)
-        };
-    }
+    if (tRate >= 0.68) return { loaiCau: 'Cầu Lệch Tài', moTa: `Tài áp đảo ${(tRate * 100).toFixed(0)}% → Bắt cầu Tài`, duDoan: 'T', doTinCay: Math.min(0.72, 0.55 + (tRate - 0.5) * 0.6) };
+    if (tRate <= 0.32) return { loaiCau: 'Cầu Lệch Xỉu', moTa: `Xỉu áp đảo ${((1 - tRate) * 100).toFixed(0)}% → Bắt cầu Xỉu`, duDoan: 'X', doTinCay: Math.min(0.72, 0.55 + (0.5 - tRate) * 0.6) };
     return null;
 }
 
-// --------------------------------
-// CẦU ĐẢO: Sau cầu bệt dài → đảo chiều
-// --------------------------------
 function phatHienCauDao(tx) {
     if (tx.length < 15) return null;
-
     const groups = [];
     let cur = { val: tx[0], len: 1 };
     for (let i = 1; i < tx.length; i++) {
@@ -483,42 +639,19 @@ function phatHienCauDao(tx) {
         else { groups.push({ ...cur }); cur = { val: tx[i], len: 1 }; }
     }
     groups.push(cur);
-
     if (groups.length < 3) return null;
-
     const lastGroup = groups[groups.length - 1];
     const prevGroup = groups[groups.length - 2];
-
-    // Vừa đảo chiều sau cầu dài
     if (prevGroup.len >= 4 && lastGroup.len <= 2) {
         const last = tx[tx.length - 1];
-        // Giai đoạn đầu đảo → theo dõi xem cầu mới hình thành
-        if (lastGroup.len === 1) {
-            // Mới đảo 1 bước → chờ xem
-            return {
-                loaiCau: 'Cầu Đảo Chiều',
-                moTa: `Vừa đảo chiều sau cầu ${prevGroup.len} → Cầu mới đang hình thành`,
-                duDoan: last,
-                doTinCay: 0.58
-            };
-        }
-        return {
-            loaiCau: 'Cầu Đảo Chiều',
-            moTa: `Đảo chiều xác nhận → Tiếp tục ${last === 'T' ? 'Tài' : 'Xỉu'}`,
-            duDoan: last,
-            doTinCay: 0.65
-        };
+        if (lastGroup.len === 1) return { loaiCau: 'Cầu Đảo Chiều', moTa: `Vừa đảo chiều sau cầu ${prevGroup.len} → Cầu mới đang hình thành`, duDoan: last, doTinCay: 0.58 };
+        return { loaiCau: 'Cầu Đảo Chiều', moTa: `Đảo chiều xác nhận → Tiếp tục ${last === 'T' ? 'Tài' : 'Xỉu'}`, duDoan: last, doTinCay: 0.65 };
     }
-
     return null;
 }
 
-// --------------------------------
-// CẦU SÓNG: nhịp tăng-giảm đều đặn
-// --------------------------------
 function phatHienCauSong(tx) {
     if (tx.length < 20) return null;
-
     const groups = [];
     let cur = { val: tx[0], len: 1 };
     for (let i = 1; i < tx.length; i++) {
@@ -526,164 +659,88 @@ function phatHienCauSong(tx) {
         else { groups.push({ ...cur }); cur = { val: tx[i], len: 1 }; }
     }
     groups.push(cur);
-
     if (groups.length < 6) return null;
-
     const lens = groups.slice(-6).map(g => g.len);
-
-    // Sóng tăng-giảm xen kẽ
     let isWave = true;
     for (let i = 1; i < lens.length - 1; i++) {
         const prevDir = Math.sign(lens[i] - lens[i-1]);
         const nextDir = Math.sign(lens[i+1] - lens[i]);
         if (prevDir === 0 || nextDir === 0 || prevDir === nextDir) { isWave = false; break; }
     }
-
     if (!isWave) return null;
-
     const last = tx[tx.length - 1];
     const curGroup = groups[groups.length - 1];
     const prevGroupLen = groups[groups.length - 2]?.len || 1;
     const prevPrevGroupLen = groups[groups.length - 3]?.len || 1;
-
-    // Dự đoán chiều dài nhóm tiếp theo
     const trendDir = prevGroupLen > prevPrevGroupLen ? 'giam' : 'tang';
     const expectedLen = trendDir === 'giam'
         ? Math.max(1, prevGroupLen - (prevPrevGroupLen - prevGroupLen))
         : prevGroupLen + (prevGroupLen - prevPrevGroupLen);
-
-    if (curGroup.len < Math.max(1, expectedLen)) {
-        return {
-            loaiCau: 'Cầu Sóng',
-            moTa: `Cầu sóng → Tiếp tục (${curGroup.len}/${expectedLen})`,
-            duDoan: last,
-            doTinCay: 0.65
-        };
-    } else {
-        return {
-            loaiCau: 'Cầu Sóng',
-            moTa: `Cầu sóng → Chuyển nhóm`,
-            duDoan: last === 'T' ? 'X' : 'T',
-            doTinCay: 0.65
-        };
-    }
+    if (curGroup.len < Math.max(1, expectedLen)) return { loaiCau: 'Cầu Sóng', moTa: `Cầu sóng → Tiếp tục (${curGroup.len}/${expectedLen})`, duDoan: last, doTinCay: 0.65 };
+    return { loaiCau: 'Cầu Sóng', moTa: `Cầu sóng → Chuyển nhóm`, duDoan: last === 'T' ? 'X' : 'T', doTinCay: 0.65 };
 }
 
-// --------------------------------
-// CẦU TUẦN HOÀN: chu kỳ cố định
-// --------------------------------
 function phatHienCauTuanHoan(tx) {
     if (tx.length < 24) return null;
-
     const str = tx.join('');
-
-    // Tìm chu kỳ lặp ngắn nhất khớp nhiều lần
     for (let cycleLen = 2; cycleLen <= 8; cycleLen++) {
         const candidate = str.slice(-cycleLen);
         let matches = 0;
         for (let i = 0; i <= str.length - cycleLen * 2; i++) {
             if (str.slice(i, i + cycleLen) === candidate) matches++;
         }
-
         if (matches >= 3) {
-            // Tìm vị trí trong chu kỳ
             const posInCycle = (tx.length % cycleLen);
             const nextPosInCycle = posInCycle % cycleLen;
-
-            // Dự đoán dựa trên chu kỳ phổ biến nhất
             const votes = { T: 0, X: 0 };
             for (let i = nextPosInCycle; i < str.length; i += cycleLen) {
                 if (str[i]) votes[str[i]]++;
             }
-
             const total = votes.T + votes.X;
             if (total < 2) continue;
-
             const winner = votes.T > votes.X ? 'T' : 'X';
             const conf = Math.max(votes.T, votes.X) / total;
-
             if (conf >= 0.65) {
-                return {
-                    loaiCau: `Cầu Tuần Hoàn-${cycleLen}`,
-                    moTa: `Chu kỳ ${cycleLen} phiên lặp ${matches}x → ${winner === 'T' ? 'Tài' : 'Xỉu'}`,
-                    duDoan: winner,
-                    doTinCay: Math.min(0.78, 0.55 + conf * 0.3 + matches * 0.02),
-                    cycleLen,
-                    matches
-                };
+                return { loaiCau: `Cầu Tuần Hoàn-${cycleLen}`, moTa: `Chu kỳ ${cycleLen} phiên lặp ${matches}x → ${winner === 'T' ? 'Tài' : 'Xỉu'}`, duDoan: winner, doTinCay: Math.min(0.78, 0.55 + conf * 0.3 + matches * 0.02), cycleLen, matches };
             }
         }
     }
     return null;
 }
 
-// --------------------------------
-// CẦU ĐỘT PHÁ: nhận diện phá vỡ cầu cũ
-// --------------------------------
 function phatHienCauDotPha(tx) {
     if (tx.length < 20) return null;
-
     const recent5 = tx.slice(-5);
     const prev10 = tx.slice(-15, -5);
-
-    // Kiểm tra xem 5 phiên gần nhất có khác biệt đột ngột với 10 phiên trước không
     const recentTRate = recent5.filter(v => v === 'T').length / 5;
     const prevTRate = prev10.filter(v => v === 'T').length / 10;
-
     const shift = Math.abs(recentTRate - prevTRate);
-
     if (shift >= 0.35) {
-        // Đột phá rõ ràng → theo xu hướng mới
         const newTrend = recentTRate > prevTRate ? 'T' : 'X';
-        return {
-            loaiCau: 'Cầu Đột Phá',
-            moTa: `Đột phá xu hướng (shift ${(shift * 100).toFixed(0)}%) → Theo ${newTrend === 'T' ? 'Tài' : 'Xỉu'}`,
-            duDoan: newTrend,
-            doTinCay: Math.min(0.68, 0.55 + shift * 0.4)
-        };
+        return { loaiCau: 'Cầu Đột Phá', moTa: `Đột phá xu hướng (shift ${(shift * 100).toFixed(0)}%) → Theo ${newTrend === 'T' ? 'Tài' : 'Xỉu'}`, duDoan: newTrend, doTinCay: Math.min(0.68, 0.55 + shift * 0.4) };
     }
     return null;
 }
 
-// --------------------------------
-// CẦU ĐỐI XỨNG: TTXX-XXTT, TXXT...
-// --------------------------------
 function phatHienCauDoiXung(tx) {
     if (tx.length < 16) return null;
-
     const recent = tx.slice(-16);
     const half = 8;
     const left = recent.slice(0, half).join('');
     const right = recent.slice(half).join('');
-
-    // Kiểm tra đối xứng gương
     const mirror = left.split('').reverse().map(c => c === 'T' ? 'X' : 'T').join('');
-
     let matchCount = 0;
-    for (let i = 0; i < half; i++) {
-        if (right[i] === mirror[i]) matchCount++;
-    }
-
+    for (let i = 0; i < half; i++) { if (right[i] === mirror[i]) matchCount++; }
     if (matchCount / half >= 0.75) {
         const last = tx[tx.length - 1];
-        // Dự đoán dựa trên đối xứng
         const posFromCenter = tx.length % (half * 2);
         const mirrorPos = half * 2 - 1 - posFromCenter;
         const mirrorVal = tx[tx.length - mirrorPos] === 'T' ? 'X' : 'T';
-
-        return {
-            loaiCau: 'Cầu Đối Xứng',
-            moTa: `Cầu đối xứng (${(matchCount / half * 100).toFixed(0)}% khớp) → ${mirrorVal === 'T' ? 'Tài' : 'Xỉu'}`,
-            duDoan: mirrorVal,
-            doTinCay: 0.60 + (matchCount / half - 0.75) * 0.5
-        };
+        return { loaiCau: 'Cầu Đối Xứng', moTa: `Cầu đối xứng (${(matchCount / half * 100).toFixed(0)}% khớp) → ${mirrorVal === 'T' ? 'Tài' : 'Xỉu'}`, duDoan: mirrorVal, doTinCay: 0.60 + (matchCount / half - 0.75) * 0.5 };
     }
     return null;
 }
 
-// --------------------------------
-// DỰ ĐOÁN THEO THỐNG KÊ (fallback)
-// --------------------------------
 function duDoanTheoThongKe(tx) {
     if (tx.length < 5) return 'T';
     const recent = tx.slice(-10);
@@ -692,7 +749,7 @@ function duDoanTheoThongKe(tx) {
 }
 
 // ============================================================
-// --- AI CORE V2 ---
+// --- AI CORE V3 (tích hợp CT68GB + Markov-3 nâng cao) ---
 // ============================================================
 class AdvancedAI {
     constructor() {
@@ -700,18 +757,18 @@ class AdvancedAI {
         this.algoPerf = {};
         this.lastPreds = {};
 
-        // Danh sách thuật toán phụ trợ (mỗi cái trả về { id, vote: 'T'|'X'|null, weight })
         this.subAlgos = [
-            { id: 'markov2',   fn: this._markov2.bind(this),   name: 'Markov-2', weight: 1.0 },
-            { id: 'markov3',   fn: this._markov3.bind(this),   name: 'Markov-3', weight: 1.0 },
-            { id: 'ema_bias',  fn: this._emaBias.bind(this),   name: 'EMA Bias', weight: 1.0 },
-            { id: 'rsi',       fn: this._rsiSignal.bind(this), name: 'RSI Signal', weight: 1.0 },
-            { id: 'bollinger', fn: this._bollinger.bind(this), name: 'Bollinger', weight: 1.0 },
-            { id: 'momentum',  fn: this._momentum.bind(this),  name: 'Momentum', weight: 1.0 },
-            { id: 'mean_rev',  fn: this._meanReversion.bind(this), name: 'Mean Rev', weight: 1.0 },
-            { id: 'dice_dist', fn: this._diceDist.bind(this),  name: 'Dice Dist', weight: 1.0 },
-            { id: 'neural',    fn: this._neuralSeq.bind(this), name: 'Neural Seq', weight: 1.0 },
-            { id: 'bayesian',  fn: this._bayesian.bind(this),  name: 'Bayesian', weight: 1.0 },
+            { id: 'markov2',    fn: this._markov2.bind(this),    name: 'Markov-2',   weight: 1.0 },
+            { id: 'markov3',    fn: this._markov3.bind(this),    name: 'Markov-3',   weight: 1.2 }, // tăng weight mặc định
+            { id: 'markov3ext', fn: this._markov3Ext.bind(this), name: 'Markov-3X',  weight: 1.2 }, // Markov-3 mở rộng (mới)
+            { id: 'ema_bias',   fn: this._emaBias.bind(this),    name: 'EMA Bias',   weight: 1.0 },
+            { id: 'rsi',        fn: this._rsiSignal.bind(this),  name: 'RSI Signal', weight: 1.0 },
+            { id: 'bollinger',  fn: this._bollinger.bind(this),  name: 'Bollinger',  weight: 1.0 },
+            { id: 'momentum',   fn: this._momentum.bind(this),   name: 'Momentum',   weight: 1.0 },
+            { id: 'mean_rev',   fn: this._meanReversion.bind(this), name: 'Mean Rev', weight: 1.0 },
+            { id: 'dice_dist',  fn: this._diceDist.bind(this),   name: 'Dice Dist',  weight: 1.0 },
+            { id: 'neural',     fn: this._neuralSeq.bind(this),  name: 'Neural Seq', weight: 1.0 },
+            { id: 'bayesian',   fn: this._bayesian.bind(this),   name: 'Bayesian',   weight: 1.0 },
         ];
 
         this.subAlgos.forEach(a => {
@@ -742,7 +799,6 @@ class AdvancedAI {
             if (perf.total >= 20) {
                 const acc = perf.correct / perf.total;
                 const recAcc = perf.recent.reduce((a, b) => a + b, 0) / perf.recent.length;
-                // Weight tự điều chỉnh: ưu tiên accuracy gần đây
                 a.weight = Math.max(0.05, Math.min(2.5,
                     (acc * 0.5 + recAcc * 0.4 + Math.min(perf.streak, 5) * 0.02) * 2.0
                 ));
@@ -754,14 +810,18 @@ class AdvancedAI {
     predict() {
         const tx = this.history.map(h => h.tx);
         if (tx.length < 10) {
-            return { prediction: 'Tài', rawPrediction: 'T', confidence: 0.5, cauInfo: null, detail: 'Chưa đủ dữ liệu' };
+            return { prediction: 'Tài', rawPrediction: 'T', confidence: 0.5, cauInfo: null, ct68Info: null, detail: 'Chưa đủ dữ liệu' };
         }
 
-        // === BƯỚC 1: PHÂN TÍCH CẦU CHUYÊN SÂU ===
-        const cauResult = phanTichCau(tx);
-        const cauWeight = 2.5; // Cầu có trọng số cao nhất
+        // === BƯỚC 1: CÔNG THỨC 68GB (ưu tiên cao nhất) ===
+        const ct68Result = congThuc68GB(this.history);
+        const CT68_WEIGHT = 3.0; // Cao nhất vì dựa trên tổng thực tế
 
-        // === BƯỚC 2: CÁC THUẬT TOÁN PHỤ TRỢ ===
+        // === BƯỚC 2: PHÂN TÍCH CẦU ===
+        const cauResult = phanTichCau(tx);
+        const CAU_WEIGHT = 2.5;
+
+        // === BƯỚC 3: CÁC THUẬT TOÁN PHỤ TRỢ ===
         const subVotes = { T: 0, X: 0 };
         let activeSubAlgos = 0;
         this.subAlgos.forEach(a => {
@@ -775,12 +835,17 @@ class AdvancedAI {
             } catch (_) {}
         });
 
-        // === BƯỚC 3: KẾT HỢP ===
+        // === BƯỚC 4: KẾT HỢP ===
         const finalVotes = { T: 0, X: 0 };
+
+        // Phiếu từ CT68GB (trọng số cao nhất)
+        if (ct68Result && (ct68Result.duDoan === 'T' || ct68Result.duDoan === 'X')) {
+            finalVotes[ct68Result.duDoan] += CT68_WEIGHT * ct68Result.doTinCay;
+        }
 
         // Phiếu từ phân tích cầu
         if (cauResult.duDoan === 'T' || cauResult.duDoan === 'X') {
-            finalVotes[cauResult.duDoan] += cauWeight * cauResult.doTinCay;
+            finalVotes[cauResult.duDoan] += CAU_WEIGHT * cauResult.doTinCay;
         }
 
         // Phiếu từ các thuật toán phụ
@@ -794,11 +859,15 @@ class AdvancedAI {
         const final = finalVotes.T >= finalVotes.X ? 'T' : 'X';
         const rawConf = Math.max(finalVotes.T, finalVotes.X) / grandTotal;
 
-        // Điều chỉnh confidence dựa trên sự đồng thuận
         const cauAgrees = cauResult.duDoan === final;
+        const ct68Agrees = ct68Result ? ct68Result.duDoan === final : false;
         const subConsensus = final === 'T' ? subVotes.T / (subTotal || 1) : subVotes.X / (subTotal || 1);
 
-        let confidence = rawConf * 0.6 + subConsensus * 0.25 + (cauAgrees ? 0.1 : 0) + cauResult.doTinCay * 0.05;
+        let confidence = rawConf * 0.55
+            + subConsensus * 0.20
+            + (cauAgrees ? 0.08 : 0)
+            + cauResult.doTinCay * 0.05
+            + (ct68Agrees && ct68Result ? ct68Result.doTinCay * 0.12 : 0);
         confidence = Math.max(0.51, Math.min(0.95, confidence));
 
         return {
@@ -806,8 +875,11 @@ class AdvancedAI {
             rawPrediction: final,
             confidence,
             cauInfo: cauResult,
+            ct68Info: ct68Result,
             activeSubAlgos,
-            detail: cauResult.moTa || 'N/A'
+            detail: ct68Result
+                ? `[CT68] ${ct68Result.moTa}`
+                : (cauResult.moTa || 'N/A')
         };
     }
 
@@ -820,17 +892,16 @@ class AdvancedAI {
         return this.history.slice(-len).map(h => h.tx).join('');
     }
 
+    getTotalPattern(len = 15) {
+        return this.history.slice(-len).map(h => h.total).join('-');
+    }
+
     getStats() {
         const stats = {};
         this.subAlgos.forEach(a => {
             const p = this.algoPerf[a.id];
             if (p.total > 0) {
-                stats[a.id] = {
-                    name: a.name,
-                    accuracy: (p.correct / p.total * 100).toFixed(1) + '%',
-                    weight: a.weight.toFixed(2),
-                    predictions: p.total
-                };
+                stats[a.id] = { name: a.name, accuracy: (p.correct / p.total * 100).toFixed(1) + '%', weight: a.weight.toFixed(2), predictions: p.total };
             }
         });
         return stats;
@@ -857,6 +928,10 @@ class AdvancedAI {
         return null;
     }
 
+    // -------------------------------------------------------
+    // MARKOV BẬC 3 - CHUẨN
+    // Xét chuỗi 2 tay trước để dự đoán tay tiếp theo
+    // -------------------------------------------------------
     _markov3(history) {
         if (history.length < 30) return null;
         const tx = history.map(h => h.tx);
@@ -871,8 +946,62 @@ class AdvancedAI {
         if (!t) return null;
         const total = t.T + t.X;
         if (total < 5) return null;
-        if (t.T / total > 0.65) return 'T';
-        if (t.X / total > 0.65) return 'X';
+        if (t.T / total > 0.62) return 'T';
+        if (t.X / total > 0.62) return 'X';
+        return null;
+    }
+
+    // -------------------------------------------------------
+    // MARKOV BẬC 3 MỞ RỘNG (MỚI)
+    // Kết hợp bậc 3 (3-gram) + bậc 4 (4-gram) + tổng điểm
+    // Ngưỡng thấp hơn, window dài hơn, xét cả tổng xúc xắc
+    // -------------------------------------------------------
+    _markov3Ext(history) {
+        if (history.length < 40) return null;
+        const tx = history.map(h => h.tx);
+
+        // 3-gram (bậc 3): xét 3 tay trước dự đoán tay thứ 4
+        const gram3 = {};
+        for (let i = 0; i < tx.length - 3; i++) {
+            const key = tx[i] + tx[i+1] + tx[i+2];
+            if (!gram3[key]) gram3[key] = { T: 0, X: 0 };
+            gram3[key][tx[i+3]]++;
+        }
+        const key3 = tx.slice(-3).join('');
+        const g3 = gram3[key3];
+        let score3T = 0, score3X = 0;
+        if (g3) {
+            const tot3 = g3.T + g3.X;
+            if (tot3 >= 4) {
+                score3T = g3.T / tot3;
+                score3X = g3.X / tot3;
+            }
+        }
+
+        // 2-gram + xét tổng xúc xắc (total trend)
+        // Nếu 2 tay cuối có tổng tăng mạnh (>= +4) → thiên Tài
+        // Nếu 2 tay cuối có tổng giảm mạnh (<= -4) → thiên Xỉu
+        let trendBoost = 0;
+        if (history.length >= 3) {
+            const recentTotals = history.slice(-3).map(h => h.total);
+            const delta = recentTotals[2] - recentTotals[0];
+            if (delta >= 4) trendBoost = 0.12;  // xu hướng tăng → tài
+            else if (delta <= -4) trendBoost = -0.12; // xu hướng giảm → xỉu
+        }
+
+        // Kết hợp
+        const finalT = score3T + (trendBoost > 0 ? trendBoost : 0);
+        const finalX = score3X + (trendBoost < 0 ? -trendBoost : 0);
+
+        if (finalT > 0 && finalT - finalX >= 0.18) return 'T';
+        if (finalX > 0 && finalX - finalT >= 0.18) return 'X';
+
+        // Fallback: nếu 3-gram rõ ràng (dù nhỏ hơn ngưỡng kết hợp)
+        if (g3) {
+            const tot3 = g3.T + g3.X;
+            if (tot3 >= 6 && score3T > 0.65) return 'T';
+            if (tot3 >= 6 && score3X > 0.65) return 'X';
+        }
         return null;
     }
 
@@ -1081,6 +1210,7 @@ function connectWebSocket() {
 
                 const prediction = ai.predict();
                 const patternStr = ai.getPatternString(25);
+                const totalStr  = ai.getTotalPattern(10);
 
                 apiResponseData = {
                     "phien": String(session),
@@ -1090,18 +1220,26 @@ function connectWebSocket() {
                     "do_tin_cay": `${(prediction.confidence * 100).toFixed(0)}%`,
                     "loai_cau": prediction.cauInfo?.loaiCau || "Hỗn loạn",
                     "mo_ta_cau": prediction.cauInfo?.moTa || "",
+                    "cong_thuc_68gb": prediction.ct68Info
+                        ? { rule: prediction.ct68Info.rule, mo_ta: prediction.ct68Info.moTa, du_doan: prediction.ct68Info.duDoan === 'T' ? 'Tài' : 'Xỉu', do_tin_cay: `${(prediction.ct68Info.doTinCay * 100).toFixed(0)}%` }
+                        : null,
                     "pattern": patternStr,
+                    "total_pattern": totalStr,
                     "chi_tiet_cau": prediction.cauInfo || {},
                     "dev": "@sewdangcap"
                 };
 
                 console.log(`\n==============================================`);
                 console.log(`📥 PHIÊN ${session}: ${total >= 11 ? 'Tài' : 'Xỉu'} (${total}) [${d1}-${d2}-${d3}]`);
+                console.log(`📐 TỔNG GẦN NHẤT: ${totalStr}`);
+                if (prediction.ct68Info) {
+                    console.log(`🃏 CT68GB: ${prediction.ct68Info.moTa}`);
+                }
                 console.log(`🎯 PHÂN TÍCH CẦU: ${prediction.cauInfo?.loaiCau || 'Hỗn loạn'}`);
                 console.log(`📝 CHI TIẾT: ${prediction.cauInfo?.moTa || 'N/A'}`);
                 console.log(`🔮 DỰ ĐOÁN ${session ? session + 1 : '?'}: **${prediction.prediction.toUpperCase()}**`);
                 console.log(`💯 ĐỘ TIN CẬY: ${(prediction.confidence * 100).toFixed(0)}%`);
-                console.log(`🤖 SUB ALGOS: ${prediction.activeSubAlgos}/10`);
+                console.log(`🤖 SUB ALGOS: ${prediction.activeSubAlgos}/11`);
                 console.log(`📊 PATTERN: ${patternStr}`);
             }
 
@@ -1112,7 +1250,7 @@ function connectWebSocket() {
                 ai.loadHistory(history);
                 rikResults = history.slice(-50).sort((a, b) => b.session - a.session);
                 const prediction = ai.predict();
-                console.log(`\n✅ AI sẵn sàng | Cầu: ${prediction.cauInfo?.loaiCau || 'Đang phân tích'} | Confidence: ${(prediction.confidence * 100).toFixed(0)}%`);
+                console.log(`\n✅ AI sẵn sàng | Cầu: ${prediction.cauInfo?.loaiCau || 'Đang phân tích'} | CT68: ${prediction.ct68Info?.moTa || 'Chưa kích hoạt'} | Confidence: ${(prediction.confidence * 100).toFixed(0)}%`);
             }
         } catch (e) { console.error('[❌] Lỗi parse message:', e.message); }
     });
@@ -1149,11 +1287,12 @@ app.get('/api/taixiu/ai-stats', (req, res) => {
     const prediction = ai.predict();
     res.json({
         status: "online",
-        ai_version: "CauAnalysis v2.0 + 10 SubAlgos",
+        ai_version: "CauAnalysis v3.0 + CT68GB + Markov-3X + 11 SubAlgos",
         current_prediction: prediction.prediction,
         confidence: `${(prediction.confidence * 100).toFixed(1)}%`,
         loai_cau: prediction.cauInfo?.loaiCau || "N/A",
         mo_ta_cau: prediction.cauInfo?.moTa || "N/A",
+        cong_thuc_68gb: prediction.ct68Info || null,
         sub_algos_active: prediction.activeSubAlgos,
         sub_algo_stats: ai.getStats()
     });
@@ -1163,13 +1302,73 @@ app.get('/api/taixiu/cau-analysis', (req, res) => {
     const tx = ai.history.map(h => h.tx);
     if (tx.length < 10) return res.json({ message: "chưa đủ dữ liệu" });
     const result = phanTichCau(tx);
+    const ct68 = congThuc68GB(ai.history);
     res.json({
         loai_cau: result.loaiCau,
         mo_ta: result.moTa,
         du_doan: result.duDoan === 'T' ? 'Tài' : (result.duDoan === 'X' ? 'Xỉu' : 'Chưa rõ'),
         do_tin_cay: `${(result.doTinCay * 100).toFixed(0)}%`,
+        cong_thuc_68gb: ct68 ? {
+            rule: ct68.rule,
+            mo_ta: ct68.moTa,
+            du_doan: ct68.duDoan === 'T' ? 'Tài' : 'Xỉu',
+            do_tin_cay: `${(ct68.doTinCay * 100).toFixed(0)}%`
+        } : null,
         chi_tiet: result,
-        pattern_25: ai.getPatternString(25)
+        pattern_25: ai.getPatternString(25),
+        total_pattern_10: ai.getTotalPattern(10)
+    });
+});
+
+// Endpoint riêng cho CT68GB
+app.get('/api/taixiu/ct68', (req, res) => {
+    if (ai.history.length < 3) return res.json({ message: "chưa đủ dữ liệu" });
+    const ct68 = congThuc68GB(ai.history);
+    const totals = ai.history.slice(-8).map(h => h.total).join(' → ');
+    res.json({
+        ten: "Công Thức 68GB Bàn Xanh",
+        lich_su_tong: totals,
+        ket_qua: ct68 ? {
+            quy_tac: ct68.rule,
+            mo_ta: ct68.moTa,
+            du_doan: ct68.duDoan === 'T' ? 'Tài' : 'Xỉu',
+            do_tin_cay: `${(ct68.doTinCay * 100).toFixed(0)}%`
+        } : { mo_ta: "Không khớp quy tắc nào", du_doan: null }
+    });
+});
+
+app.get('/api/taixiu/markov3', (req, res) => {
+    const tx = ai.history.map(h => h.tx);
+    if (tx.length < 40) return res.json({ message: "chưa đủ dữ liệu (cần 40+)" });
+
+    // Build full Markov-3 table
+    const trans = {};
+    for (let i = 0; i < tx.length - 3; i++) {
+        const key = tx[i] + tx[i+1] + tx[i+2];
+        if (!trans[key]) trans[key] = { T: 0, X: 0 };
+        trans[key][tx[i+3]]++;
+    }
+    const key3 = tx.slice(-3).join('');
+    const g = trans[key3];
+    const last3 = tx.slice(-3);
+
+    res.json({
+        ten: "Markov Bậc 3 (3-gram)",
+        chuoi_3_tay_cuoi: last3.join(''),
+        thong_ke: g ? {
+            tai: g.T, xiu: g.X, tong: g.T + g.X,
+            xac_suat_tai: g.T + g.X > 0 ? `${(g.T / (g.T + g.X) * 100).toFixed(1)}%` : 'N/A',
+            xac_suat_xiu: g.T + g.X > 0 ? `${(g.X / (g.T + g.X) * 100).toFixed(1)}%` : 'N/A',
+        } : { mo_ta: "Chưa có dữ liệu cho chuỗi này" },
+        bang_markov_3: Object.entries(trans)
+            .filter(([, v]) => v.T + v.X >= 5)
+            .sort((a, b) => (b[1].T + b[1].X) - (a[1].T + a[1].X))
+            .slice(0, 12)
+            .map(([key, v]) => ({
+                chuoi: key,
+                tai: v.T, xiu: v.X,
+                xu_huong: v.T > v.X ? `Tài (${(v.T / (v.T + v.X) * 100).toFixed(0)}%)` : `Xỉu (${(v.X / (v.T + v.X) * 100).toFixed(0)}%)`
+            }))
     });
 });
 
@@ -1188,12 +1387,13 @@ app.get('/api/token-status', (req, res) => {
 // ============================================================
 app.listen(PORT, () => {
     console.log(`====================================`);
-    console.log(`🚀 SUN AI Server v2.0 - Port: ${PORT}`);
+    console.log(`🚀 SUN AI Server v3.0 - Port: ${PORT}`);
     console.log(`   Tài khoản  : ${ACCOUNT.username}`);
+    console.log(`   Công thức  : CT68GB (15 quy tắc)`);
     console.log(`   Cầu phân tích: 10 loại cầu`);
-    console.log(`   Sub Algos  : 10 thuật toán`);
+    console.log(`   Sub Algos  : 11 (Markov-3 + Markov-3X mới)`);
     console.log(`   Auto Token : ✅ BẬT`);
-    console.log(`   Endpoints  : /sunlon | /api/taixiu/cau-analysis`);
+    console.log(`   Endpoints  : /sunlon | /api/taixiu/ct68 | /api/taixiu/markov3`);
     console.log(`====================================`);
     startTokenWatcher();
     connectWebSocket();
