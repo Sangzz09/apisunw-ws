@@ -14,8 +14,9 @@ const WS_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     "Origin": "https://play.sun.win"
 };
-const RECONNECT_DELAY = 3000;
-const PING_INTERVAL = 15000;
+const RECONNECT_DELAY = 1000;   // ⚡ giảm từ 3000 → 1000
+const PING_INTERVAL   = 8000;   // ⚡ giảm từ 15000 → 8000
+const MSG_DELAY       = 100;    // ⚡ giảm từ 600 → 100
 
 const ACCOUNT = {
     username: "Msangzz09",
@@ -73,7 +74,7 @@ function startTokenWatcher() {
     const checkAndRefresh = async () => {
         const timeLeft = tokenExpiry - Date.now();
         console.log(`⏱️  Token còn hạn: ${Math.floor(timeLeft / 60000)} phút`);
-        if (timeLeft < 15 * 60 * 1000) await refreshToken();
+        if (timeLeft < 30 * 60 * 1000) await refreshToken(); // ⚡ tăng buffer từ 15 → 30 phút
     };
     checkAndRefresh();
     setInterval(checkAndRefresh, 5 * 60 * 1000);
@@ -131,14 +132,11 @@ function congThuc68GB(history) {
     const n = history.length;
     const totals = history.map(h => h.total);
     const txArr  = history.map(h => h.tx);
-    const t0 = totals[n - 1];
-    const t1 = totals[n - 2];
+    const t0 = totals[n - 1], t1 = totals[n - 2];
     const t2 = n >= 3 ? totals[n - 3] : null;
     const t3 = n >= 4 ? totals[n - 4] : null;
-    const tx0 = txArr[n - 1];
-    const tx1 = txArr[n - 2];
+    const tx0 = txArr[n - 1], tx1 = txArr[n - 2];
     const tx2 = n >= 3 ? txArr[n - 3] : null;
-    const tx3 = n >= 4 ? txArr[n - 4] : null;
     const isKep    = t0 === t1;
     const isTriple = isKep && n >= 3 && t0 === t2;
 
@@ -147,8 +145,7 @@ function congThuc68GB(history) {
         const allSameTx = streak5.every(v => v === streak5[0]);
         if (allSameTx) {
             const tot5 = totals.slice(-5);
-            const maxT = Math.max(...tot5);
-            const minT = Math.min(...tot5);
+            const maxT = Math.max(...tot5), minT = Math.min(...tot5);
             if ((maxT - minT) >= 4) {
                 const opposite = tx0 === 'T' ? 'X' : 'T';
                 return { rule: 1, duDoan: opposite, doTinCay: 0.67, moTa: `CT68 R1: Cầu bệt dao động mạnh (${minT}-${maxT}) → Bẻ ${opposite === 'T' ? 'Tài' : 'Xỉu'}` };
@@ -171,8 +168,8 @@ function congThuc68GB(history) {
 
     if (isKep && t0 === 11 && tx2 === 'X') return { rule: 3, duDoan: 'T', doTinCay: 0.68, moTa: `CT68 R3: Kép 11-11 sau xỉu → Tài` };
     if ((t0 === 16 || t0 === 17) && tx0 === 'T') return { rule: '3b', duDoan: 'X', doTinCay: 0.72, moTa: `CT68 R3b: Tổng Tài ${t0} (cao bất thường) → Bẻ Xỉu` };
-    if (tx0 === 'X' && tx1 === 'X') { const t0Even = t0 % 2 === 0; const t1Even = t1 % 2 === 0; if (t0Even !== t1Even) return { rule: 4, duDoan: 'T', doTinCay: 0.66, moTa: `CT68 R4: 2 Xỉu chẵn-lẻ (${t1} & ${t0}) → Tài` }; }
-    if (t3 !== null) { const peak = Math.max(t3, t2, t1); const valleyBefore = Math.min(t3, t2); if (peak >= 14 && valleyBefore <= 11 && t0 <= 10) return { rule: 5, duDoan: 'T', doTinCay: 0.66, moTa: `CT68 R5: Sóng nhỏ→cao(${peak})→nhỏ(${t0}) → Bẻ Tài` }; }
+    if (tx0 === 'X' && tx1 === 'X') { const t0Even = t0 % 2 === 0, t1Even = t1 % 2 === 0; if (t0Even !== t1Even) return { rule: 4, duDoan: 'T', doTinCay: 0.66, moTa: `CT68 R4: 2 Xỉu chẵn-lẻ (${t1} & ${t0}) → Tài` }; }
+    if (t3 !== null) { const peak = Math.max(t3, t2, t1), valleyBefore = Math.min(t3, t2); if (peak >= 14 && valleyBefore <= 11 && t0 <= 10) return { rule: 5, duDoan: 'T', doTinCay: 0.66, moTa: `CT68 R5: Sóng nhỏ→cao(${peak})→nhỏ(${t0}) → Bẻ Tài` }; }
     if (t2 !== null) { const isZigzag3 = tx0 !== tx1 && tx1 !== tx2; if (isZigzag3 && t2 > t0 + 3) return { rule: 6, duDoan: 'X', doTinCay: 0.65, moTa: `CT68 R6: Cầu 1-1, đầu (${t2}) >> mới (${t0}) → Xỉu` }; }
     if (tx0 === 'X' && tx1 === 'X' && t0 < t1) return { rule: 7, duDoan: 'X', doTinCay: 0.63, moTa: `CT68 R7: Xỉu lùi (${t1}→${t0}) → Tiếp Xỉu` };
     if (tx0 === 'T' && tx1 === 'T' && t0 < t1) return { rule: 8, duDoan: 'X', doTinCay: 0.66, moTa: `CT68 R8: Tài lùi (${t1}→${t0}) → Bẻ Xỉu` };
@@ -482,12 +479,17 @@ let ws = null, pingInterval = null, reconnectTimeout = null, isConnecting = fals
 
 function getInitialMessages() {
     return [
+        // [0] Auth
         [1, "MiniGame", "GM_apivopnha", "WangLin", {
             "info": JSON.stringify({ ipAddress: "14.249.227.107", wsToken: currentToken, locale: "vi", userId: "8838533e-de43-4b8d-9503-621f4050534e", username: "GM_apivopnha", timestamp: Date.now() }),
             "signature": "45EF4B318C883862C36E1B189A1DF5465EBB60CB602BA05FAD8FCBFCD6E0DA8CB3CE65333EDD79A2BB4ABFCE326ED5525C7D971D9DEDB5A17A72764287FFE6F62CBC2DF8A04CD8EFF8D0D5AE27046947ADE45E62E644111EFDE96A74FEC635A97861A425FF2B5732D74F41176703CA10CFEED67D0745FF15EAC1065E1C8BCBFA"
         }],
+        // [1] Subscribe game
         [6, "MiniGame", "taixiuPlugin", { cmd: 1005 }],
-        [6, "MiniGame", "lobbyPlugin", { cmd: 10001 }]
+        // [2] Lobby
+        [6, "MiniGame", "lobbyPlugin",  { cmd: 10001 }],
+        // [3] ⚡ Request lịch sử ngay lập tức
+        [6, "MiniGame", "taixiuPlugin", { cmd: 1007, limit: 100 }]
     ];
 }
 
@@ -510,8 +512,19 @@ function connectWebSocket() {
     ws.on('open', () => {
         console.log('✅ WebSocket connected.');
         isConnecting = false;
-        getInitialMessages().forEach((msg, i) => { setTimeout(() => { if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg)); }, i * 600); });
-        pingInterval = setInterval(() => { if (ws?.readyState === WebSocket.OPEN) ws.ping(); }, PING_INTERVAL);
+
+        // ⚡ Gửi tất cả messages ngay, delay tối thiểu 100ms
+        getInitialMessages().forEach((msg, i) => {
+            setTimeout(() => {
+                if (ws?.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify(msg));
+                }
+            }, i * MSG_DELAY);
+        });
+
+        pingInterval = setInterval(() => {
+            if (ws?.readyState === WebSocket.OPEN) ws.ping();
+        }, PING_INTERVAL);
     });
 
     ws.on('pong', () => console.log('[📶] Ping OK.'));
@@ -530,6 +543,7 @@ function connectWebSocket() {
 
             if (cmd === 1008 && sid) currentSessionId = sid;
 
+            // ⚡ Nhận kết quả phiên mới
             if (cmd === 1003 && gBB) {
                 if (!d1 || !d2 || !d3) return;
                 const total = d1 + d2 + d3;
@@ -574,12 +588,32 @@ function connectWebSocket() {
                 console.log(`📊 PATTERN: ${patternStr}`);
             }
 
+            // ⚡ Nhận lịch sử (htr) — xử lý ngay lập tức
             if (payload.htr && Array.isArray(payload.htr)) {
-                const history = payload.htr.map(i => ({ session: i.sid, dice: [i.d1, i.d2, i.d3], total: i.d1 + i.d2 + i.d3 })).filter(i => i.dice.every(d => d > 0));
+                const history = payload.htr
+                    .map(i => ({ session: i.sid, dice: [i.d1, i.d2, i.d3], total: i.d1 + i.d2 + i.d3 }))
+                    .filter(i => i.dice.every(d => d > 0));
                 ai.loadHistory(history);
-                rikResults = history.slice(-50).sort((a, b) => b.session - a.session);
+                rikResults = history.slice(-100).sort((a, b) => b.session - a.session);
+
+                // ⚡ Tính ngay dự đoán sau khi có lịch sử
                 const prediction = ai.predict();
-                console.log(`\n✅ AI sẵn sàng | Cầu: ${prediction.cauInfo?.loaiCau || 'Đang phân tích'} | Confidence: ${(prediction.confidence * 100).toFixed(0)}%`);
+                const patternStr = ai.getPatternString(25);
+                if (rikResults.length > 0) {
+                    const latest = rikResults[0];
+                    apiResponseData = {
+                        "phien_hien_tai": latest.session,
+                        "ket_qua": latest.total >= 11 ? 'Tài' : 'Xỉu',
+                        "xuc_xac": latest.dice,
+                        "phien_du_doan": latest.session ? latest.session + 1 : null,
+                        "du_doan": prediction.prediction,
+                        "do_tin_cay": `${(prediction.confidence * 100).toFixed(0)}%`,
+                        "pattern": patternStr,
+                        "id": "@sewdangcap"
+                    };
+                }
+
+                console.log(`\n✅ AI sẵn sàng | Lịch sử: ${history.length} phiên | Cầu: ${prediction.cauInfo?.loaiCau || 'Đang phân tích'} | Confidence: ${(prediction.confidence * 100).toFixed(0)}%`);
             }
         } catch (e) { console.error('[❌] Lỗi parse message:', e.message); }
     });
@@ -610,384 +644,111 @@ const HTML_PAGE = `<!DOCTYPE html>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
   :root {
-    --bg: #0d1117;
-    --bg2: #161b22;
-    --bg3: #1c2128;
-    --border: #30363d;
-    --border-hover: #484f58;
-    --text: #e6edf3;
-    --text-muted: #8b949e;
-    --cyan: #39d0f0;
-    --cyan-dim: rgba(57,208,240,0.12);
-    --green: #3fb950;
-    --green-dim: rgba(63,185,80,0.12);
-    --yellow: #d29922;
-    --yellow-dim: rgba(210,153,34,0.12);
-    --blue: #58a6ff;
-    --blue-dim: rgba(88,166,255,0.1);
-    --purple: #bc8cff;
-    --red: #f85149;
+    --bg: #0d1117; --bg2: #161b22; --bg3: #1c2128; --border: #30363d;
+    --border-hover: #484f58; --text: #e6edf3; --text-muted: #8b949e;
+    --cyan: #39d0f0; --cyan-dim: rgba(57,208,240,0.12);
+    --green: #3fb950; --green-dim: rgba(63,185,80,0.12);
+    --yellow: #d29922; --yellow-dim: rgba(210,153,34,0.12);
+    --blue: #58a6ff; --blue-dim: rgba(88,166,255,0.1);
+    --purple: #bc8cff; --red: #f85149;
   }
-
-  body {
-    background: var(--bg);
-    color: var(--text);
-    font-family: 'Space Grotesk', sans-serif;
-    min-height: 100vh;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    padding: 60px 20px 40px;
-    position: relative;
-    overflow-x: hidden;
-  }
-
-  /* Grid background */
-  body::before {
-    content: '';
-    position: fixed;
-    inset: 0;
-    background-image:
-      linear-gradient(rgba(57,208,240,0.03) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(57,208,240,0.03) 1px, transparent 1px);
-    background-size: 40px 40px;
-    pointer-events: none;
-    z-index: 0;
-  }
-
-  /* Glow orb top */
-  body::after {
-    content: '';
-    position: fixed;
-    top: -200px;
-    left: 50%;
-    transform: translateX(-50%);
-    width: 600px;
-    height: 400px;
-    background: radial-gradient(ellipse, rgba(57,208,240,0.08) 0%, transparent 70%);
-    pointer-events: none;
-    z-index: 0;
-  }
-
-  .container {
-    width: 100%;
-    max-width: 1100px;
-    position: relative;
-    z-index: 1;
-  }
-
-  /* HEADER */
-  .header {
-    text-align: center;
-    margin-bottom: 56px;
-    animation: fadeDown 0.6s ease both;
-  }
-
-  .header-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    background: var(--cyan-dim);
-    border: 1px solid rgba(57,208,240,0.25);
-    color: var(--cyan);
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 11px;
-    letter-spacing: 0.08em;
-    padding: 4px 12px;
-    border-radius: 20px;
-    margin-bottom: 20px;
-  }
-
-  .header-badge::before {
-    content: '';
-    width: 6px;
-    height: 6px;
-    background: var(--cyan);
-    border-radius: 50%;
-    box-shadow: 0 0 6px var(--cyan);
-    animation: pulse 2s infinite;
-  }
-
-  .title {
-    font-size: clamp(28px, 5vw, 48px);
-    font-weight: 700;
-    background: linear-gradient(135deg, var(--cyan) 0%, var(--blue) 50%, var(--purple) 100%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-    line-height: 1.1;
-    margin-bottom: 12px;
-    letter-spacing: -0.02em;
-  }
-
-  .subtitle {
-    color: var(--text-muted);
-    font-size: 15px;
-    font-family: 'JetBrains Mono', monospace;
-  }
-
-  .subtitle span {
-    color: var(--cyan);
-  }
-
-  /* GRID */
-  .grid {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 16px;
-    margin-bottom: 16px;
-  }
-
-  .grid-bottom {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 16px;
-    margin-bottom: 48px;
-  }
-
-  /* CARD */
-  .card {
-    background: var(--bg2);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 24px;
-    cursor: pointer;
-    transition: all 0.22s ease;
-    text-decoration: none;
-    color: inherit;
-    display: block;
-    position: relative;
-    overflow: hidden;
-    animation: fadeUp 0.5s ease both;
-  }
-
-  .card::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    opacity: 0;
-    transition: opacity 0.22s ease;
-    border-radius: 12px;
-  }
-
-  .card:hover {
-    border-color: var(--border-hover);
-    transform: translateY(-3px);
-    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
-  }
-
+  body { background: var(--bg); color: var(--text); font-family: 'Space Grotesk', sans-serif; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 60px 20px 40px; position: relative; overflow-x: hidden; }
+  body::before { content: ''; position: fixed; inset: 0; background-image: linear-gradient(rgba(57,208,240,0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(57,208,240,0.03) 1px, transparent 1px); background-size: 40px 40px; pointer-events: none; z-index: 0; }
+  body::after { content: ''; position: fixed; top: -200px; left: 50%; transform: translateX(-50%); width: 600px; height: 400px; background: radial-gradient(ellipse, rgba(57,208,240,0.08) 0%, transparent 70%); pointer-events: none; z-index: 0; }
+  .container { width: 100%; max-width: 1100px; position: relative; z-index: 1; }
+  .header { text-align: center; margin-bottom: 56px; animation: fadeDown 0.6s ease both; }
+  .header-badge { display: inline-flex; align-items: center; gap: 6px; background: var(--cyan-dim); border: 1px solid rgba(57,208,240,0.25); color: var(--cyan); font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: 0.08em; padding: 4px 12px; border-radius: 20px; margin-bottom: 20px; }
+  .header-badge::before { content: ''; width: 6px; height: 6px; background: var(--cyan); border-radius: 50%; box-shadow: 0 0 6px var(--cyan); animation: pulse 2s infinite; }
+  .title { font-size: clamp(28px, 5vw, 48px); font-weight: 700; background: linear-gradient(135deg, var(--cyan) 0%, var(--blue) 50%, var(--purple) 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; line-height: 1.1; margin-bottom: 12px; letter-spacing: -0.02em; }
+  .subtitle { color: var(--text-muted); font-size: 15px; font-family: 'JetBrains Mono', monospace; }
+  .subtitle span { color: var(--cyan); }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 16px; }
+  .grid-bottom { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; margin-bottom: 48px; }
+  .card { background: var(--bg2); border: 1px solid var(--border); border-radius: 12px; padding: 24px; cursor: pointer; transition: all 0.22s ease; text-decoration: none; color: inherit; display: block; position: relative; overflow: hidden; animation: fadeUp 0.5s ease both; }
+  .card::before { content: ''; position: absolute; inset: 0; opacity: 0; transition: opacity 0.22s ease; border-radius: 12px; }
+  .card:hover { border-color: var(--border-hover); transform: translateY(-3px); box-shadow: 0 8px 32px rgba(0,0,0,0.4); }
   .card:hover::before { opacity: 1; }
-
-  /* Card color variants */
   .card-cyan::before { background: radial-gradient(ellipse at top left, rgba(57,208,240,0.06), transparent 60%); }
   .card-cyan:hover { border-color: rgba(57,208,240,0.4); box-shadow: 0 8px 32px rgba(57,208,240,0.1); }
-
   .card-green::before { background: radial-gradient(ellipse at top left, rgba(63,185,80,0.06), transparent 60%); }
   .card-green:hover { border-color: rgba(63,185,80,0.4); box-shadow: 0 8px 32px rgba(63,185,80,0.1); }
-
   .card-yellow::before { background: radial-gradient(ellipse at top left, rgba(210,153,34,0.06), transparent 60%); }
   .card-yellow:hover { border-color: rgba(210,153,34,0.4); box-shadow: 0 8px 32px rgba(210,153,34,0.1); }
-
   .card-blue::before { background: radial-gradient(ellipse at top left, rgba(88,166,255,0.06), transparent 60%); }
   .card-blue:hover { border-color: rgba(88,166,255,0.4); box-shadow: 0 8px 32px rgba(88,166,255,0.1); }
-
   .card-purple::before { background: radial-gradient(ellipse at top left, rgba(188,140,255,0.06), transparent 60%); }
   .card-purple:hover { border-color: rgba(188,140,255,0.4); box-shadow: 0 8px 32px rgba(188,140,255,0.1); }
-
-  .card-nth-1 { animation-delay: 0.05s; }
-  .card-nth-2 { animation-delay: 0.10s; }
-  .card-nth-3 { animation-delay: 0.15s; }
-  .card-nth-4 { animation-delay: 0.20s; }
-  .card-nth-5 { animation-delay: 0.25s; }
-
-  .card-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 10px;
-    font-weight: 500;
-    letter-spacing: 0.06em;
-    padding: 3px 9px;
-    border-radius: 6px;
-    margin-bottom: 14px;
-    text-transform: uppercase;
-  }
-
+  .card-nth-1 { animation-delay: 0.05s; } .card-nth-2 { animation-delay: 0.10s; } .card-nth-3 { animation-delay: 0.15s; } .card-nth-4 { animation-delay: 0.20s; } .card-nth-5 { animation-delay: 0.25s; }
+  .card-badge { display: inline-flex; align-items: center; gap: 5px; font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 500; letter-spacing: 0.06em; padding: 3px 9px; border-radius: 6px; margin-bottom: 14px; text-transform: uppercase; }
   .badge-json { background: var(--green-dim); color: var(--green); border: 1px solid rgba(63,185,80,0.2); }
   .badge-info { background: var(--yellow-dim); color: var(--yellow); border: 1px solid rgba(210,153,34,0.2); }
   .badge-stats { background: var(--blue-dim); color: var(--blue); border: 1px solid rgba(88,166,255,0.2); }
-
-  .badge-dot {
-    width: 5px;
-    height: 5px;
-    border-radius: 50%;
-    background: currentColor;
-  }
-
-  .card-route {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 20px;
-    font-weight: 600;
-    margin-bottom: 10px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
+  .badge-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+  .card-route { font-family: 'JetBrains Mono', monospace; font-size: 20px; font-weight: 600; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
   .card-route .icon { font-size: 22px; }
-
-  .card-desc {
-    color: var(--text-muted);
-    font-size: 13.5px;
-    line-height: 1.6;
-  }
-
-  /* STATS BAR */
-  .stats-bar {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 32px;
-    background: var(--bg2);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 16px 32px;
-    margin-bottom: 48px;
-    animation: fadeUp 0.5s 0.3s ease both;
-    flex-wrap: wrap;
-  }
-
-  .stat-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 13px;
-    color: var(--text-muted);
-  }
-
-  .stat-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    animation: pulse 2s infinite;
-  }
-
+  .card-desc { color: var(--text-muted); font-size: 13.5px; line-height: 1.6; }
+  .stats-bar { display: flex; align-items: center; justify-content: center; gap: 32px; background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 16px 32px; margin-bottom: 48px; animation: fadeUp 0.5s 0.3s ease both; flex-wrap: wrap; }
+  .stat-item { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-muted); }
+  .stat-dot { width: 8px; height: 8px; border-radius: 50%; animation: pulse 2s infinite; }
   .stat-dot.green { background: var(--green); box-shadow: 0 0 8px var(--green); }
   .stat-dot.cyan { background: var(--cyan); box-shadow: 0 0 8px var(--cyan); }
   .stat-dot.yellow { background: var(--yellow); box-shadow: 0 0 8px var(--yellow); }
-
   .stat-value { color: var(--text); font-weight: 600; font-family: 'JetBrains Mono', monospace; }
-
-  /* FOOTER */
-  .footer {
-    text-align: center;
-    color: var(--text-muted);
-    font-size: 13px;
-    font-family: 'JetBrains Mono', monospace;
-    animation: fadeUp 0.5s 0.35s ease both;
-  }
-
+  .footer { text-align: center; color: var(--text-muted); font-size: 13px; font-family: 'JetBrains Mono', monospace; animation: fadeUp 0.5s 0.35s ease both; }
   .footer a { color: var(--cyan); text-decoration: none; }
   .footer a:hover { text-decoration: underline; }
-
-  /* ANIMATIONS */
-  @keyframes fadeDown {
-    from { opacity: 0; transform: translateY(-20px); }
-    to   { opacity: 1; transform: translateY(0); }
-  }
-
-  @keyframes fadeUp {
-    from { opacity: 0; transform: translateY(16px); }
-    to   { opacity: 1; transform: translateY(0); }
-  }
-
-  @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.4; }
-  }
-
-  /* RESPONSIVE */
-  @media (max-width: 768px) {
-    body { padding: 40px 16px 30px; }
-    .grid { grid-template-columns: 1fr; }
-    .grid-bottom { grid-template-columns: 1fr; }
-    .stats-bar { gap: 16px; padding: 14px 20px; }
-  }
-
-  @media (min-width: 769px) and (max-width: 1024px) {
-    .grid { grid-template-columns: repeat(2, 1fr); }
-    .grid-bottom { grid-template-columns: repeat(2, 1fr); }
-  }
+  @keyframes fadeDown { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes fadeUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+  @media (max-width: 768px) { body { padding: 40px 16px 30px; } .grid { grid-template-columns: 1fr; } .grid-bottom { grid-template-columns: 1fr; } .stats-bar { gap: 16px; padding: 14px 20px; } }
+  @media (min-width: 769px) and (max-width: 1024px) { .grid { grid-template-columns: repeat(2, 1fr); } .grid-bottom { grid-template-columns: repeat(2, 1fr); } }
 </style>
 </head>
 <body>
 <div class="container">
-
   <header class="header">
     <div class="header-badge">LIVE · SUNWIN API v3.0</div>
     <h1 class="title">API Tool Tài Xiu Sunwin</h1>
     <p class="subtitle">Được dev bởi <span>@sewdangcap</span></p>
   </header>
-
   <div class="stats-bar">
-    <div class="stat-item">
-      <span class="stat-dot green"></span>
-      <span>WebSocket</span>
-      <span class="stat-value">ONLINE</span>
-    </div>
-    <div class="stat-item">
-      <span class="stat-dot cyan"></span>
-      <span>AI Engine</span>
-      <span class="stat-value">CT68 + Markov-3X</span>
-    </div>
-    <div class="stat-item">
-      <span class="stat-dot yellow"></span>
-      <span>Sub Algos</span>
-      <span class="stat-value">11 Active</span>
-    </div>
+    <div class="stat-item"><span class="stat-dot green"></span><span>WebSocket</span><span class="stat-value">ONLINE</span></div>
+    <div class="stat-item"><span class="stat-dot cyan"></span><span>AI Engine</span><span class="stat-value">CT68 + Markov-3X</span></div>
+    <div class="stat-item"><span class="stat-dot yellow"></span><span>Sub Algos</span><span class="stat-value">11 Active</span></div>
   </div>
-
   <div class="grid">
     <a class="card card-cyan card-nth-1" href="/sunlon" target="_blank">
       <div class="card-badge badge-json"><span class="badge-dot"></span>JSON</div>
       <div class="card-route"><span class="icon">⚡</span>/sunlon</div>
       <div class="card-desc">Dự đoán phiên tiếp theo — JSON realtime kết hợp CT68GB + Markov-3X</div>
     </a>
-
     <a class="card card-green card-nth-2" href="/api/taixiu/history" target="_blank">
       <div class="card-badge badge-json"><span class="badge-dot"></span>JSON</div>
       <div class="card-route"><span class="icon">📋</span>/history</div>
       <div class="card-desc">Lịch sử 50 phiên gần nhất với tổng điểm xúc xắc và kết quả</div>
     </a>
-
     <a class="card card-yellow card-nth-3" href="/thangthua" target="_blank">
       <div class="card-badge badge-stats"><span class="badge-dot"></span>STATS</div>
       <div class="card-route"><span class="icon">📊</span>/thangthua</div>
       <div class="card-desc">Thống kê thắng / thua — Win rate, tổng win/lose từng phiên</div>
     </a>
   </div>
-
   <div class="grid-bottom">
     <a class="card card-blue card-nth-4" href="/api/taixiu/ct68" target="_blank">
       <div class="card-badge badge-json"><span class="badge-dot"></span>JSON</div>
       <div class="card-route"><span class="icon">🃏</span>/ct68</div>
       <div class="card-desc">Phân tích Công Thức 68GB — 15 quy tắc bàn xanh realtime</div>
     </a>
-
     <a class="card card-purple card-nth-5" href="/id" target="_blank">
       <div class="card-badge badge-info"><span class="badge-dot"></span>INFO</div>
       <div class="card-route"><span class="icon">👤</span>/id</div>
       <div class="card-desc">Thông tin dev &amp; liên hệ Telegram @sewdangcap</div>
     </a>
   </div>
-
   <footer class="footer">
     <p>© 2025 DEV <a href="https://t.me/sewdangcap" target="_blank">@sewdangcap</a> — All rights reserved</p>
   </footer>
-
 </div>
 </body>
 </html>`;
@@ -996,7 +757,6 @@ const HTML_PAGE = `<!DOCTYPE html>
 // --- API ENDPOINTS ---
 // ============================================================
 
-// Landing page HTML
 app.get('/', (req, res) => {
     const accept = req.headers['accept'] || '';
     if (accept.includes('text/html')) {
@@ -1006,10 +766,8 @@ app.get('/', (req, res) => {
     res.json(apiResponseData);
 });
 
-// Main prediction endpoint - format mới
 app.get('/sunlon', (req, res) => res.json(apiResponseData));
 
-// Lịch sử phiên
 app.get('/api/taixiu/history', (req, res) => {
     if (!rikResults.length) return res.json({ message: "chưa có dữ liệu" });
     res.json(rikResults.slice(0, 30).map(r => ({
@@ -1018,7 +776,6 @@ app.get('/api/taixiu/history', (req, res) => {
     })));
 });
 
-// Alias /history
 app.get('/history', (req, res) => {
     if (!rikResults.length) return res.json({ message: "chưa có dữ liệu" });
     res.json(rikResults.slice(0, 30).map(r => ({
@@ -1027,7 +784,6 @@ app.get('/history', (req, res) => {
     })));
 });
 
-// Thống kê thắng/thua
 app.get('/thangthua', (req, res) => {
     const winRate = winLoseStats.total > 0 ? (winLoseStats.wins / winLoseStats.total * 100).toFixed(1) + '%' : 'N/A';
     res.json({
@@ -1040,7 +796,6 @@ app.get('/thangthua', (req, res) => {
     });
 });
 
-// ID / Info
 app.get('/id', (req, res) => res.json({
     dev: "@sewdangcap",
     telegram: "https://t.me/sewdangcap",
@@ -1049,7 +804,6 @@ app.get('/id', (req, res) => res.json({
     endpoints: ["/sunlon", "/history", "/thangthua", "/ct68", "/id"]
 }));
 
-// CT68 endpoint
 app.get('/api/taixiu/ct68', (req, res) => {
     if (ai.history.length < 3) return res.json({ message: "chưa đủ dữ liệu" });
     const ct68 = congThuc68GB(ai.history);
@@ -1061,7 +815,6 @@ app.get('/api/taixiu/ct68', (req, res) => {
     });
 });
 
-// Alias /ct68
 app.get('/ct68', (req, res) => {
     if (ai.history.length < 3) return res.json({ message: "chưa đủ dữ liệu" });
     const ct68 = congThuc68GB(ai.history);
@@ -1087,6 +840,9 @@ app.listen(PORT, () => {
     console.log(`   Tài khoản  : ${ACCOUNT.username}`);
     console.log(`   Công thức  : CT68GB (15 quy tắc)`);
     console.log(`   Sub Algos  : 11 (Markov-3X)`);
+    console.log(`   Reconnect  : ${RECONNECT_DELAY}ms`);
+    console.log(`   Ping       : ${PING_INTERVAL}ms`);
+    console.log(`   Msg delay  : ${MSG_DELAY}ms`);
     console.log(`   Landing    : GET / → HTML`);
     console.log(`   Endpoints  : /sunlon /history /thangthua /ct68 /id`);
     console.log(`====================================`);
