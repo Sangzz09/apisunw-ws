@@ -143,7 +143,14 @@ const PATTERN_DATABASE = {
 // --- GLOBAL STATE ---
 // ============================================================
 let rikResults = [];
-let currentSessionId = null;
+
+// --- SESSION TRACKING (fix mất phiên) ---
+// Thay vì dùng 1 biến currentSessionId dễ bị null,
+// dùng Map để buffer kết quả & session riêng biệt rồi ghép lại
+let sessionBuffer = null;   // { sid } từ cmd 1008
+let resultBuffer  = null;   // { d1,d2,d3 } từ cmd 1003
+let lastSessionId = null;   // session cuối cùng đã xử lý thành công
+let sessionCounter = 0;     // auto-increment nếu không có sid
 
 let apiResponseData = {
     "phien": null,
@@ -216,6 +223,108 @@ function calcEntropy(txArr) {
     if (tCount === 0 || xCount === 0) return 0;
     const pt = tCount / n, px = xCount / n;
     return -(pt * Math.log2(pt) + px * Math.log2(px));
+}
+
+// ============================================================
+// --- SESSION LOGIC (fix mất phiên) ---
+// ============================================================
+
+/**
+ * Gọi khi có đủ cả session + result.
+ * Xử lý hoàn toàn 1 phiên: AI, log, update apiResponseData.
+ */
+function processCompletedRound(sid, d1, d2, d3) {
+    const total = d1 + d2 + d3;
+    const record = { session: sid, dice: [d1, d2, d3], total };
+
+    ai.addResult(record);
+
+    rikResults.unshift(record);
+    if (rikResults.length > 100) rikResults.pop();
+
+    lastSessionId = sid;
+
+    const prediction = ai.predict();
+    const pattern    = ai.getPattern();
+    const patternStr = ai.getPatternString(20);
+    const nextSid    = sid + 1;
+
+    apiResponseData = {
+        "phien"         : String(sid),
+        "xuc_xac"       : [d1, d2, d3],
+        "phien_hien_tai": String(nextSid),
+        "du_doan"       : prediction.prediction,
+        "do_tin_cay"    : `${(prediction.confidence * 100).toFixed(0)}%`,
+        "loai_cau"      : pattern.discovered || "Không rõ cầu",
+        "pattern"       : patternStr,
+        "dev"           : "@sewdangcap"
+    };
+
+    console.log(`\n==============================================`);
+    console.log(`📥 PHIÊN ${sid}: ${total >= 11 ? 'Tài' : 'Xỉu'} (${total}) [${d1}-${d2}-${d3}]`);
+    console.log(`🔮 DỰ ĐOÁN ${nextSid}: **${prediction.prediction.toUpperCase()}**`);
+    console.log(`🎯 CONFIDENCE: ${(prediction.confidence * 100).toFixed(0)}%`);
+    console.log(`🤖 ALGORITHMS: ${prediction.algorithms}/${ALGORITHMS.length}`);
+    console.log(`📌 CẦU: ${pattern.discovered || 'Không rõ'}`);
+    console.log(`📊 PATTERN: ${patternStr}`);
+}
+
+/**
+ * Nhận cmd 1008 (session ID mới).
+ * - Nếu đang có resultBuffer chờ → ghép và xử lý ngay.
+ * - Nếu không → lưu vào sessionBuffer chờ result.
+ */
+function onReceiveSession(sid) {
+    // Nếu có kết quả đang chờ session → ghép ngay
+    if (resultBuffer) {
+        const { d1, d2, d3 } = resultBuffer;
+        resultBuffer = null;
+        sessionBuffer = null;
+        console.log(`🔗 [1008 muộn] Ghép sid=${sid} với result đã buffer → xử lý`);
+        processCompletedRound(sid, d1, d2, d3);
+    } else {
+        // Lưu chờ result
+        sessionBuffer = { sid };
+    }
+}
+
+/**
+ * Nhận cmd 1003 (kết quả xúc xắc).
+ * - Nếu đang có sessionBuffer → ghép và xử lý ngay.
+ * - Nếu không → buffer result, chờ session tối đa 3s.
+ *   Sau 3s nếu vẫn không có session → dùng lastSessionId+1 hoặc auto-increment.
+ */
+function onReceiveResult(d1, d2, d3) {
+    if (sessionBuffer) {
+        const { sid } = sessionBuffer;
+        sessionBuffer = null;
+        processCompletedRound(sid, d1, d2, d3);
+    } else {
+        // Buffer result, chờ session đến
+        resultBuffer = { d1, d2, d3 };
+        console.log(`⏳ [1003 sớm] Result buffer, chờ sid từ cmd 1008...`);
+
+        // Timeout 3s: nếu cmd 1008 không đến thì tự suy session
+        setTimeout(() => {
+            if (!resultBuffer) return; // đã được xử lý bởi onReceiveSession
+            const { d1: _d1, d2: _d2, d3: _d3 } = resultBuffer;
+            resultBuffer = null;
+            sessionBuffer = null;
+
+            // Suy session: lastSessionId + 1, hoặc dùng counter
+            let inferredSid;
+            if (lastSessionId) {
+                inferredSid = lastSessionId + 1;
+                console.log(`⚠️  Timeout sid, suy luận: ${inferredSid} (lastSessionId+1)`);
+            } else {
+                sessionCounter++;
+                inferredSid = sessionCounter;
+                console.log(`⚠️  Timeout sid, dùng counter: ${inferredSid}`);
+            }
+
+            processCompletedRound(inferredSid, _d1, _d2, _d3);
+        }, 3000);
+    }
 }
 
 // ============================================================
@@ -433,18 +542,15 @@ function algo10_entropyAI(history) {
     const entropy10 = calcEntropy(tx.slice(-10));
     const entropy20 = calcEntropy(tx.slice(-20));
     const entropy40 = calcEntropy(tx.slice(-40));
-    // Khi entropy thấp → cầu bệt → tiếp tục
     if (entropy10 < 0.7) {
         const last = tx[tx.length - 1];
         return last;
     }
-    // Khi entropy giảm dần → xu hướng đang hình thành
     if (entropy10 < entropy20 && entropy20 < entropy40) {
         const recentTx = tx.slice(-10);
         const tCount = recentTx.filter(t => t === 'T').length;
         return tCount >= 6 ? 'T' : 'X';
     }
-    // Khi entropy tăng → hỗn loạn → dùng momentum
     if (entropy10 > entropy20 * 1.1) {
         const totals = history.map(h => h.total);
         const avg5 = totals.slice(-5).reduce((a, b) => a + b, 0) / 5;
@@ -462,7 +568,6 @@ function algo11_emaCrossover(history) {
     const ema26 = calcEMA(totals, 26);
     const prevEma5 = calcEMA(totals.slice(0, -1), 5);
     const prevEma13 = calcEMA(totals.slice(0, -1), 13);
-    // Golden cross / death cross
     if (prevEma5 < prevEma13 && ema5 > ema13) return 'T';
     if (prevEma5 > prevEma13 && ema5 < ema13) return 'X';
     if (ema5 > ema13 && ema13 > ema26) return 'T';
@@ -480,7 +585,6 @@ function algo12_streakBreakerPro(history) {
         if (tx[i] === last) streak++;
         else break;
     }
-    // Chuỗi dài → khả năng break cao
     if (streak >= 6) return last === 'T' ? 'X' : 'T';
     if (streak >= 4) {
         const totals = history.map(h => h.total);
@@ -488,7 +592,6 @@ function algo12_streakBreakerPro(history) {
         if (last === 'T' && avg < 12.5) return 'X';
         if (last === 'X' && avg > 8.5) return 'T';
     }
-    // Chuỗi ngắn → tiếp tục
     if (streak <= 2) {
         const prev2 = tx.slice(-4, -2).join('');
         if (prev2 === last + last) return last;
@@ -506,7 +609,6 @@ function algo13_neuralSequence(history) {
     let count = 0;
     for (let i = 0; i <= tx.length - seqLen - 1; i++) {
         const seq = tx.slice(i, i + seqLen).join('');
-        // Tính độ tương đồng
         let sim = 0;
         for (let j = 0; j < seqLen; j++) {
             if (seq[j] === lastSeq[j]) sim++;
@@ -534,7 +636,6 @@ function algo14_meanReversion(history) {
     const deviation = shortMean - longMean;
     const std = calcStdDev(totals.slice(-30));
     const zScore = deviation / (std || 1);
-    // Z-score cao → revert về mean
     if (zScore > 1.5) return 'X';
     if (zScore < -1.5) return 'T';
     if (zScore > 0.8) return 'X';
@@ -568,25 +669,20 @@ function algo16_diceSumDistribution(history) {
     const totals = history.map(h => h.total);
     const dist = {};
     totals.forEach(t => { dist[t] = (dist[t] || 0) + 1; });
-    // Tính xác suất lý thuyết của từng tổng
     const theoretical = {
         3: 1, 4: 3, 5: 6, 6: 10, 7: 15, 8: 21, 9: 25, 10: 27,
         11: 27, 12: 25, 13: 21, 14: 15, 15: 10, 16: 6, 17: 3, 18: 1
     };
     const totalTheo = 216;
     const n = totals.length;
-    // Tính tổng nào bị under/over-represented
     let taiExpected = 0, xiuExpected = 0;
     let taiActual = 0, xiuActual = 0;
     for (let sum = 3; sum <= 18; sum++) {
         const expected = (theoretical[sum] || 0) / totalTheo * n;
         const actual = dist[sum] || 0;
-        const deficit = expected - actual;
         if (sum >= 11) { taiExpected += expected; taiActual += actual; }
         else { xiuExpected += expected; xiuActual += actual; }
-        // Nếu tổng nào đó thiếu nhiều → có thể sắp xuất hiện
     }
-    // So sánh tỷ lệ thực tế với lý thuyết
     const taiRatio = taiActual / (taiExpected || 1);
     const xiuRatio = xiuActual / (xiuExpected || 1);
     if (xiuRatio < 0.88 && taiRatio > 1.05) return 'X';
@@ -601,10 +697,8 @@ function algo17_hotColdAI(history) {
     const old = history.slice(-40, -20).map(h => h.total);
     const avgRecent = recent.reduce((a, b) => a + b, 0) / recent.length;
     const avgOld = old.reduce((a, b) => a + b, 0) / old.length;
-    // Hot: xu hướng gần đây rõ ràng
     if (avgRecent > avgOld + 0.5 && avgRecent > 11) return 'T';
     if (avgRecent < avgOld - 0.5 && avgRecent < 10) return 'X';
-    // Cold: cân bằng đang thay đổi
     const tCountRecent = recent.filter(t => t >= 11).length;
     const tCountOld = old.filter(t => t >= 11).length;
     if (tCountRecent > 14 && tCountOld < 10) return 'T';
@@ -618,14 +712,11 @@ function algo18_momentumOscillator(history) {
     const totals = history.map(h => h.total);
     const tx = history.map(h => h.tx);
     const n = totals.length;
-    // Rate of change
     const roc5 = (totals[n-1] - totals[n-6]) / totals[n-6] * 100;
     const roc10 = (totals[n-1] - totals[n-11]) / totals[n-11] * 100;
-    // Stochastic
     const high10 = Math.max(...totals.slice(-10));
     const low10 = Math.min(...totals.slice(-10));
     const stoch = (totals[n-1] - low10) / (high10 - low10 || 1) * 100;
-    // Williams %R
     const willR = (high10 - totals[n-1]) / (high10 - low10 || 1) * -100;
     let tScore = 0, xScore = 0;
     if (roc5 > 2) tScore += 1; else if (roc5 < -2) xScore += 1;
@@ -642,7 +733,6 @@ function algo19_cycleDetection(history) {
     if (history.length < 40) return null;
     const tx = history.map(h => h.tx);
     const str = tx.join('');
-    // Tìm chu kỳ lặp lại
     for (let cycleLen = 2; cycleLen <= 10; cycleLen++) {
         const lastCycle = str.slice(-cycleLen);
         let matches = 0;
@@ -650,7 +740,6 @@ function algo19_cycleDetection(history) {
             if (str.slice(i, i + cycleLen) === lastCycle) matches++;
         }
         if (matches >= 3) {
-            // Dự đoán phần tử tiếp theo dựa trên chu kỳ
             const nextInCycle = tx[tx.length - cycleLen + 1 % cycleLen];
             if (nextInCycle) return nextInCycle;
         }
@@ -662,19 +751,15 @@ function algo19_cycleDetection(history) {
 function algo20_bayesianAI(history) {
     if (history.length < 20) return null;
     const tx = history.map(h => h.tx);
-    // Prior: 50/50
     let priorT = 0.5, priorX = 0.5;
-    // Update với evidence từ nhiều window size
     const windows = [5, 10, 15, 20];
     windows.forEach(w => {
         if (tx.length >= w) {
             const recent = tx.slice(-w);
             const tRate = recent.filter(t => t === 'T').length / w;
             const xRate = 1 - tRate;
-            // Likelihood
             const likT = 0.5 + (tRate - 0.5) * 0.6;
             const likX = 0.5 + (xRate - 0.5) * 0.6;
-            // Update prior
             const normFactor = priorT * likT + priorX * likX;
             priorT = (priorT * likT) / normFactor;
             priorX = (priorX * likX) / normFactor;
@@ -719,8 +804,6 @@ class AdvancedAI {
         this.history = [];
         this.weights = {};
         this.performance = {};
-        // pendingPreds: dự đoán cho phiên KẾ TIẾP (chưa có kết quả)
-        // khi kết quả phiên đó về → so sánh → cập nhật weight
         this.pendingPreds = {};
         ALGORITHMS.forEach(a => {
             this.weights[a.id] = 1.0;
@@ -729,23 +812,13 @@ class AdvancedAI {
         });
     }
 
-    // Gọi khi có kết quả phiên mới:
-    // 1. Đánh giá pendingPreds (dự đoán của phiên này)
-    // 2. Push kết quả vào history
-    // 3. Chạy predict cho phiên tiếp theo → lưu vào pendingPreds
     addResult(record) {
         const parsed = parseRecord(record);
-
-        // Bước 1: Cập nhật weight dựa trên pendingPreds vs kết quả thực
         if (this.history.length >= 15) {
             this._updatePerformance(parsed.tx);
         }
-
-        // Bước 2: Lưu kết quả
         this.history.push(parsed);
         if (this.history.length > 500) this.history = this.history.slice(-400);
-
-        // Bước 3: Chạy từng algo ngay sau khi có kết quả mới → lưu pending cho phiên sau
         ALGORITHMS.forEach(a => {
             try {
                 const p = a.fn(this.history);
@@ -754,7 +827,6 @@ class AdvancedAI {
                 this.pendingPreds[a.id] = null;
             }
         });
-
         return parsed;
     }
 
@@ -762,19 +834,16 @@ class AdvancedAI {
         ALGORITHMS.forEach(a => {
             const perf = this.performance[a.id];
             const pred = this.pendingPreds[a.id];
-            if (!pred) return; // algo không đưa ra dự đoán → bỏ qua
-
+            if (!pred) return;
             const correct = pred === actualTx;
             perf.correct += correct ? 1 : 0;
             perf.total++;
             perf.streak = correct ? perf.streak + 1 : 0;
             perf.recent.push(correct ? 1 : 0);
             if (perf.recent.length > 15) perf.recent.shift();
-
             if (perf.total >= 10) {
                 const acc = perf.correct / perf.total;
                 const recAcc = perf.recent.reduce((a, b) => a + b, 0) / perf.recent.length;
-                // Weight tăng khi chính xác cao, giảm khi sai liên tục
                 const targetW = Math.max(0.05, Math.min(2.5,
                     acc * 0.5 + recAcc * 0.4 + Math.min(perf.streak, 5) * 0.04
                 ));
@@ -783,12 +852,10 @@ class AdvancedAI {
         });
     }
 
-    // predict() đọc pendingPreds hiện tại (đã được tính sau kết quả gần nhất)
     predict() {
         if (this.history.length < 15) {
             return { prediction: 'Tài', rawPrediction: 'T', confidence: 0.5, algorithms: 0 };
         }
-
         const preds = [];
         ALGORITHMS.forEach(a => {
             const p = this.pendingPreds[a.id];
@@ -796,9 +863,7 @@ class AdvancedAI {
                 preds.push({ id: a.id, prediction: p, weight: this.weights[a.id] });
             }
         });
-
         if (preds.length === 0) {
-            // Fallback: chạy lại tất cả algo không cache
             ALGORITHMS.forEach(a => {
                 try {
                     const p = a.fn(this.history);
@@ -808,23 +873,18 @@ class AdvancedAI {
                 } catch (_) {}
             });
         }
-
         if (preds.length === 0) {
             return { prediction: 'Tài', rawPrediction: 'T', confidence: 0.5, algorithms: 0 };
         }
-
         const votes = { T: 0, X: 0 };
         preds.forEach(p => { votes[p.prediction] += p.weight; });
         const totalW = votes.T + votes.X;
         const final = votes.T > votes.X ? 'T' : 'X';
         const consensus = preds.filter(p => p.prediction === final).length / preds.length;
-
-        // Confidence thực sự dựa trên chênh lệch vote + mức đồng thuận
         const voteRatio = Math.max(votes.T, votes.X) / totalW;
         const confidence = Math.max(0.51, Math.min(0.96,
             voteRatio * 0.65 + consensus * 0.35
         ));
-
         return {
             prediction: final === 'T' ? 'Tài' : 'Xỉu',
             rawPrediction: final,
@@ -835,7 +895,6 @@ class AdvancedAI {
 
     loadHistory(arr) {
         this.history = arr.map(parseRecord).sort((a, b) => a.session - b.session);
-        // Khởi tạo pendingPreds ngay sau khi load lịch sử
         ALGORITHMS.forEach(a => {
             try {
                 const p = a.fn(this.history);
@@ -922,6 +981,11 @@ function connectWebSocket() {
     isConnecting = true;
     clearInterval(pingInterval);
     clearTimeout(reconnectTimeout);
+
+    // Reset session buffers khi reconnect
+    sessionBuffer = null;
+    resultBuffer  = null;
+
     if (ws) {
         ws.removeAllListeners();
         try { ws.close(); } catch (_) {}
@@ -959,6 +1023,7 @@ function connectWebSocket() {
             const payload = data[1];
             const { cmd, sid, d1, d2, d3, gBB } = payload;
 
+            // Xử lý token hết hạn
             if (payload.code === 401 || payload.error === 'token_expired' ||
                 (typeof payload.msg === 'string' && payload.msg.toLowerCase().includes('token'))) {
                 console.log("⚠️  Token bị từ chối, đang refresh...");
@@ -966,46 +1031,20 @@ function connectWebSocket() {
                 return;
             }
 
+            // --- CMD 1008: Nhận session ID phiên mới ---
             if (cmd === 1008 && sid) {
-                currentSessionId = sid;
+                console.log(`📌 [cmd 1008] sid=${sid}`);
+                onReceiveSession(sid);
             }
 
+            // --- CMD 1003: Nhận kết quả xúc xắc ---
             if (cmd === 1003 && gBB) {
                 if (!d1 || !d2 || !d3) return;
-                const total = d1 + d2 + d3;
-                const session = currentSessionId;
-
-                const record = { session, dice: [d1, d2, d3], total };
-                const parsed = ai.addResult(record);
-
-                rikResults.unshift(record);
-                if (rikResults.length > 100) rikResults.pop();
-                currentSessionId = null;
-
-                const prediction = ai.predict();
-                const pattern = ai.getPattern();
-                const patternStr = ai.getPatternString(20);
-
-                apiResponseData = {
-                    "phien": String(session),
-                    "xuc_xac": [d1, d2, d3],
-                    "phien_hien_tai": session ? String(session + 1) : null,
-                    "du_doan": prediction.prediction,
-                    "do_tin_cay": `${(prediction.confidence * 100).toFixed(0)}%`,
-                    "loai_cau": pattern.discovered || "Không rõ cầu",
-                    "pattern": patternStr,
-                    "dev": "@sewdangcap"
-                };
-
-                console.log(`\n==============================================`);
-                console.log(`📥 PHIÊN ${session}: ${total >= 11 ? 'Tài' : 'Xỉu'} (${total}) [${d1}-${d2}-${d3}]`);
-                console.log(`🔮 DỰ ĐOÁN ${session ? session + 1 : '?'}: **${prediction.prediction.toUpperCase()}**`);
-                console.log(`🎯 CONFIDENCE: ${(prediction.confidence * 100).toFixed(0)}%`);
-                console.log(`🤖 ALGORITHMS: ${prediction.algorithms}/${ALGORITHMS.length}`);
-                console.log(`📌 CẦU: ${pattern.discovered || 'Không rõ'}`);
-                console.log(`📊 PATTERN: ${patternStr}`);
+                console.log(`🎲 [cmd 1003] d1=${d1} d2=${d2} d3=${d3}`);
+                onReceiveResult(d1, d2, d3);
             }
 
+            // --- Load lịch sử ---
             if (payload.htr && Array.isArray(payload.htr)) {
                 const history = payload.htr.map(i => ({
                     session: i.sid,
@@ -1014,6 +1053,12 @@ function connectWebSocket() {
                 })).filter(i => i.dice.every(d => d > 0));
                 ai.loadHistory(history);
                 rikResults = history.slice(-50).sort((a, b) => b.session - a.session);
+
+                // Đặt lastSessionId từ lịch sử
+                if (history.length > 0) {
+                    lastSessionId = Math.max(...history.map(h => h.session));
+                }
+
                 const prediction = ai.predict();
                 console.log(`\n✅ AI sẵn sàng | ${ALGORITHMS.length} thuật toán | Confidence: ${(prediction.confidence * 100).toFixed(0)}%`);
             }
