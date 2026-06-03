@@ -9,14 +9,14 @@ const app = express();
 app.use(cors());
 const PORT = process.env.PORT || 3001;
 
-const WS_BASE_URL = "wss://ws-lby.azhkthg1.net/wsbinary?token="; // ✅ URL mới
+const WS_BASE_URL = "wss://websocket.azhkthg1.net/wsbinary?token="; // ✅ URL mới
 const WS_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     "Origin": "https://play.sun.win"
 };
 const RECONNECT_DELAY = 3000;
 const PING_INTERVAL = 15000;
-const FORCE_REFRESH_INTERVAL = 2 * 60 * 60 * 1000; // ✅ 2 giờ bắt buộc login lại
+const FORCE_REFRESH_INTERVAL = 2 * 60 * 60 * 1000;
 
 const ACCOUNT = {
     username: "Msangzz09",
@@ -24,7 +24,7 @@ const ACCOUNT = {
     loginUrl: "https://web.sunwin.ec/api/auth/login",
 };
 
-let currentToken = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhbW91bnQiOjAsInVzZXJuYW1lIjoiU0NfYXBpc3Vud2luMTIzIn0.hgrRbSV6vnBwJMg9ZFtbx3rRu9mX_hZMZ_m5gMNhkw0";
+let currentToken = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJnZW5kZXIiOjAsImNhblZpZXdTdGF0IjpmYWxzZSwiZGlzcGxheU5hbWUiOiJib3RydW1zdW53aW5zZXciLCJib3QiOjAsImlzTWVyY2hhbnQiOmZhbHNlLCJ2ZXJpZmllZEJhbmtBY2NvdW50IjpmYWxzZSwicGxheUV2ZW50TG9iYnkiOmZhbHNlLCJjdXN0b21lcklkIjozMzMzOTY2NzYsImFmZklkIjoic3VuLndpbiIsImJhbm5lZCI6ZmFsc2UsImJyYW5kIjoic3VuLndpbiIsImVtYWlsIjoiIiwidGltZXN0YW1wIjoxNzgwNDk0MTQ3NDY4LCJsb2NrR2FtZXMiOltdLCJhbW91bnQiOjAsImxvY2tDaGF0IjpmYWxzZSwicGhvbmVWZXJpZmllZCI6dHJ1ZSwiaXBBZGRyZXNzIjoiMTQuMjQwLjIxLjIxMyIsIm11dGUiOmZhbHNlLCJhdmF0YXIiOiJodHRwczovL2ltYWdlcy5zd2luc2hvcC5uZXQvaW1hZ2VzL2F2YXRhci9hdmF0YXJfMDUucG5nIiwicGxhdGZvcm1JZCI6NCwidXNlcklkIjoiOTJmOTJlODAtZWM2Zi00NDk4LTkzMjQtMTE5NWIxZTg2NTE0IiwiZW1haWxWZXJpZmllZCI6bnVsbCwicmVnVGltZSI6MTc2NzgwMDQ0ODcxNywicGhvbmUiOiI4NDg4NjAyNzc2NyIsImRlcG9zaXQiOnRydWUsInVzZXJuYW1lIjoiU0Nfc2FuZ3p6MjAwOSJ9.hDRsYdAMPCDnikvLAKvVJ18Yry5dP6VZrHT9uxe945g";
 let tokenExpiry = null;
 let isRefreshing = false;
 
@@ -57,7 +57,7 @@ async function refreshToken() {
             currentToken = newToken;
             tokenExpiry = parseTokenExpiry(newToken);
             console.log(`✅ Token mới OK! Hết hạn: ${new Date(tokenExpiry).toLocaleString('vi-VN')}`);
-            connectWebSocket(); // ✅ Reconnect ngay sau khi có token mới
+            connectWebSocket();
         } else {
             console.error("❌ Không lấy được token. Response:", JSON.stringify(data));
             setTimeout(refreshToken, 60 * 1000);
@@ -73,7 +73,6 @@ function startTokenWatcher() {
     tokenExpiry = parseTokenExpiry(currentToken);
     console.log(`🔑 Token hết hạn lúc: ${new Date(tokenExpiry).toLocaleString('vi-VN')}`);
 
-    // Check token sắp hết hạn mỗi 5 phút
     const checkAndRefresh = async () => {
         const timeLeft = tokenExpiry - Date.now();
         console.log(`⏱️  Token còn hạn: ${Math.floor(timeLeft / 60000)} phút`);
@@ -82,11 +81,10 @@ function startTokenWatcher() {
     checkAndRefresh();
     setInterval(checkAndRefresh, 5 * 60 * 1000);
 
-    // ✅ BẮT BUỘC login lại mỗi 2 giờ dù token còn hạn hay không
     console.log(`🔄 Auto login 2 giờ/lần: ✅ BẬT`);
     setInterval(async () => {
         console.log(`\n⏰ [2H TIMER] Bắt buộc refresh token sau 2 giờ...`);
-        isRefreshing = false; // Reset cờ để cho phép refresh
+        isRefreshing = false;
         await refreshToken();
     }, FORCE_REFRESH_INTERVAL);
 }
@@ -1015,6 +1013,20 @@ function connectWebSocket() {
 app.get('/sunlon', (req, res) => res.json(apiResponseData));
 app.get('/', (req, res) => res.json(apiResponseData));
 
+app.get('/debug', (req, res) => {
+    res.json({
+        wsState: ws ? ws.readyState : 'null',
+        wsStateText: ws ? ['CONNECTING','OPEN','CLOSING','CLOSED'][ws.readyState] : 'null',
+        historyCount: ai.history.length,
+        rikCount: rikResults.length,
+        tokenLast20: currentToken.slice(-20),
+        tokenExpiry: tokenExpiry ? new Date(tokenExpiry).toLocaleString('vi-VN') : null,
+        tokenMinutesLeft: tokenExpiry ? Math.floor((tokenExpiry - Date.now()) / 60000) : null,
+        currentSessionId,
+        uptime: Math.floor(process.uptime()) + 's'
+    });
+});
+
 app.get('/api/taixiu/history', (req, res) => {
     if (!rikResults.length) return res.json({ message: "chưa có dữ liệu" });
     res.json(rikResults.slice(0, 30).map(r => ({
@@ -1112,7 +1124,7 @@ app.listen(PORT, () => {
     console.log(`   Cầu phân tích: 10 loại cầu`);
     console.log(`   Sub Algos  : 11 (Markov-3 + Markov-3X)`);
     console.log(`   Auto Token : ✅ BẬT (5 phút check + bắt buộc 2 giờ/lần)`);
-    console.log(`   Endpoints  : /sunlon | /api/taixiu/ct68 | /api/taixiu/markov3`);
+    console.log(`   Endpoints  : /sunlon | /debug | /api/taixiu/ct68 | /api/taixiu/markov3`);
     console.log(`====================================`);
     startTokenWatcher();
     connectWebSocket();
