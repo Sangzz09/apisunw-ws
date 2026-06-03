@@ -1,11 +1,10 @@
 // get.js - Sun.Win Tài Xỉu Data Stream (Node.js)
-const WebSocket = require('ws');
-const express = require('express');
-const cors = require('cors');
-const fs = require('fs');
-const os = require('os');
-const http = require('http');
-const https = require('https');
+import WebSocket from 'ws';
+import express from 'express';
+import cors from 'cors';
+import fs from 'fs';
+import os from 'os';
+import https from 'https';
 
 const app = express();
 app.use(cors());
