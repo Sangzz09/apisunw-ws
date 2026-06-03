@@ -2,10 +2,25 @@ const WebSocket = require('ws');
 const express = require('express');
 const cors = require('cors');
 const os = require('os');
+const fs = require('fs');
 
 const app = express();
 app.use(cors());
 const PORT = process.env.PORT || 3001;
+const HISTORY_FILE = './history.json';
+
+// ===== LOAD HISTORY TỪ FILE =====
+let patternHistory = [];
+try {
+    if (fs.existsSync(HISTORY_FILE)) {
+        const raw = fs.readFileSync(HISTORY_FILE, 'utf8');
+        patternHistory = JSON.parse(raw);
+        console.log(`[📂] Đã load ${patternHistory.length} phiên từ file`);
+    }
+} catch (e) {
+    console.error('[❌] Lỗi load history:', e.message);
+    patternHistory = [];
+}
 
 let apiResponseData = {
     "Phien": null,
@@ -36,7 +51,9 @@ let missedSessionCount = 0;
 // ===== CHỐNG TRÙNG: lưu các sid đã commit =====
 const committedSessions = new Set();
 
-const patternHistory = [];
+// ===== WATCHDOG: phát hiện sid bị stuck =====
+let sameSessionCount = 0;
+let lastCheckedSid = null;
 
 const WEBSOCKET_URL = "wss://websocket.azhkthg1.net/websocket?token=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhbW91bnQiOjAsInVzZXJuYW1lIjoiU0NfYXBpc3Vud2luMTIzIn0.hgrRbSV6vnBwJMg9ZFtbx3rRu9mX_hZMZ_m5gMNhkw0";
 
@@ -51,6 +68,8 @@ const WS_HEADERS = {
 const RECONNECT_DELAY = 2000;
 const PING_INTERVAL = 25000;
 const HEARTBEAT_INTERVAL = 5000;
+const WATCHDOG_INTERVAL = 30000;   // kiểm tra mỗi 30 giây
+const WATCHDOG_MAX_SAME = 4;       // sau 4 lần (2 phút) → reconnect
 
 const KNOWN_CMDS = [1003, 1005, 1007, 1008, 1011, 10000, 10001];
 
@@ -74,6 +93,7 @@ const heartbeatMessage = [6, "MiniGame", "taixiuPlugin", { cmd: 1005 }];
 let ws = null;
 let pingInterval = null;
 let heartbeatInterval = null;
+let watchdogInterval = null;
 let reconnectTimeout = null;
 let pendingDiceTimer = null;
 let wsConnectedAt = null;
@@ -97,6 +117,13 @@ const getNetworkInfo = () => {
     }
     return { localIP };
 };
+
+// ===== LƯU HISTORY ASYNC =====
+function saveHistory() {
+    fs.writeFile(HISTORY_FILE, JSON.stringify(patternHistory), 'utf8', (err) => {
+        if (err) console.error('[❌] Lỗi lưu history:', err.message);
+    });
+}
 
 // ===== GỬI MESSAGE AN TOÀN =====
 function safeSend(msg, label) {
@@ -127,14 +154,11 @@ function detectMissedSessions(newSid) {
 
 // ===== COMMIT KẾT QUẢ VÀO STATE =====
 function commitResult(sessionId, d1, d2, d3, timestamp, source) {
-    // Chỉ chống trùng tuyệt đối khi sid đến trực tiếp từ message
-    // KHÔNG block fallback source vì nhiều phiên khác nhau có thể rơi vào cùng sid cũ
     const strictSources = ['1003-sid', 'pending-flush', 'pending-timeout'];
     if (sessionId && committedSessions.has(sessionId) && strictSources.includes(source)) {
         console.log(`[⚠️ SKIP] Phiên ${sessionId} đã commit, bỏ qua duplicate [${source}]`);
         return;
     }
-    // Với fallback: chỉ skip nếu dice hoàn toàn giống nhau
     if (sessionId && committedSessions.has(sessionId) && !strictSources.includes(source)) {
         const last = patternHistory[patternHistory.length - 1];
         if (last && last.session === sessionId && last.dice[0] === d1 && last.dice[1] === d2 && last.dice[2] === d3) {
@@ -146,15 +170,13 @@ function commitResult(sessionId, d1, d2, d3, timestamp, source) {
     const total = d1 + d2 + d3;
     const result = (total >= 11) ? "Tài" : "Xỉu";
 
-    // Kiểm tra phiên bị mất trước khi commit
     detectMissedSessions(sessionId);
 
     if (sessionId) {
         lastKnownSessionId = sessionId;
         lastCommittedSessionId = sessionId;
         seenSessions.add(sessionId);
-        committedSessions.add(sessionId);   // đánh dấu đã commit
-        // Giới hạn bộ nhớ set
+        committedSessions.add(sessionId);
         if (committedSessions.size > 500) {
             const firstKey = committedSessions.values().next().value;
             committedSessions.delete(firstKey);
@@ -185,7 +207,10 @@ function commitResult(sessionId, d1, d2, d3, timestamp, source) {
         source
     });
 
-    if (patternHistory.length > 50) patternHistory.shift();
+    if (patternHistory.length > 500) patternHistory.shift();
+
+    // Lưu file async, không block event loop
+    saveHistory();
 }
 
 // ===== XỬ LÝ PENDING DICE =====
@@ -206,18 +231,21 @@ function storePendingDice(d1, d2, d3, timestamp) {
     }, PENDING_DICE_TIMEOUT);
 }
 
-// ===== XỬ LÝ PHIÊN MỚI =====
+// ===== XỬ LÝ PHIÊN MỚI — FIX: bỏ qua join room trùng sid =====
 function handleNewSession(sid, rawData) {
     const isNewSession = currentSessionId !== sid;
     currentSessionId = sid;
     lastKnownSessionId = sid;
     seenSessions.add(sid);
 
-    if (isNewSession) {
-        sessionCounter++;
-        console.log(`[🎮] Phiên mới bắt đầu: ${sid} (tổng phiên nhận: ${sessionCounter})`);
+    // FIX: không gửi join room lại nếu sid không đổi
+    if (!isNewSession) {
+        console.log(`[⏭️] Bỏ qua join room trùng sid=${sid}`);
+        return;
     }
 
+    sessionCounter++;
+    console.log(`[🎮] Phiên mới bắt đầu: ${sid} (tổng phiên nhận: ${sessionCounter})`);
     console.log(`[1008 RAW] sid=${sid}`, JSON.stringify(rawData));
 
     // Gửi join room
@@ -235,24 +263,19 @@ function handleNewSession(sid, rawData) {
     }
 }
 
-// ===== FIX #2: XỬ LÝ cmd=1003 — BỎ ĐIỀU KIỆN gBB, DÙNG SID TRONG MESSAGE =====
+// ===== XỬ LÝ cmd=1003 =====
 function handle1003(data1) {
     const { d1, d2, d3, sid, gBB } = data1;
 
     console.log(`[🎲] cmd=1003: d1=${d1}, d2=${d2}, d3=${d3}, gBB=${gBB}, sid=${sid || 'N/A'}`);
 
-    // Phải có đủ xúc xắc
     if (!d1 || !d2 || !d3) {
         console.log('[⚠️] Thiếu d1/d2/d3, bỏ qua. raw=', JSON.stringify(data1));
         return;
     }
 
-    // Track sid dù có xử lý hay không
     if (sid) seenSessions.add(sid);
 
-    // ===== FIX CHÍNH: không lọc theo gBB nữa =====
-    // gBB=false vẫn có thể là kết quả thật, chỉ là trạng thái game server
-    // Ưu tiên: sid trong message 1003 > currentSessionId > lastKnownSessionId
     const resolvedSid = sid || currentSessionId || lastKnownSessionId;
     const receiveTime = new Date().toISOString();
 
@@ -263,6 +286,26 @@ function handle1003(data1) {
         console.log('[⚠️] Không có sid nào, lưu pending...');
         storePendingDice(d1, d2, d3, receiveTime);
     }
+}
+
+// ===== WATCHDOG: phát hiện và xử lý sid bị stuck =====
+function startWatchdog() {
+    clearInterval(watchdogInterval);
+    watchdogInterval = setInterval(() => {
+        if (currentSessionId && currentSessionId === lastCheckedSid) {
+            sameSessionCount++;
+            console.log(`[⚠️ WATCHDOG] Sid ${currentSessionId} không đổi (${sameSessionCount * (WATCHDOG_INTERVAL / 1000)}s)`);
+            if (sameSessionCount >= WATCHDOG_MAX_SAME) {
+                console.log(`[🔄 WATCHDOG] Force reconnect do sid bị stuck quá ${WATCHDOG_MAX_SAME * (WATCHDOG_INTERVAL / 1000)}s!`);
+                sameSessionCount = 0;
+                lastCheckedSid = null;
+                if (ws) ws.terminate();
+            }
+        } else {
+            sameSessionCount = 0;
+            lastCheckedSid = currentSessionId;
+        }
+    }, WATCHDOG_INTERVAL);
 }
 
 function connectWebSocket() {
@@ -331,6 +374,9 @@ function connectWebSocket() {
                 }
             }
         }, HEARTBEAT_INTERVAL);
+
+        // Khởi động watchdog
+        startWatchdog();
     });
 
     ws.on('pong', () => {
@@ -354,22 +400,18 @@ function connectWebSocket() {
 
             const { cmd } = data[1];
 
-            // Log cmd lạ
             if (cmd !== undefined && !KNOWN_CMDS.includes(cmd)) {
                 console.log(`[❓ CMD LẠ] cmd=${cmd}`, JSON.stringify(data[1]).slice(0, 400));
             }
 
-            // ── PHIÊN MỚI (cmd 1008) ──
             if (cmd === 1008 && data[1].sid) {
                 handleNewSession(data[1].sid, data[1]);
             }
 
-            // ── KẾT QUẢ XÚC XẮC (cmd 1003) ──
             if (cmd === 1003) {
                 handle1003(data[1]);
             }
 
-            // Log raw cmd=1011
             if (cmd === 1011) {
                 console.log(`[1011 RAW]`, JSON.stringify(data[1]).slice(0, 400));
             }
@@ -390,6 +432,7 @@ function connectWebSocket() {
 
         clearInterval(pingInterval);
         clearInterval(heartbeatInterval);
+        clearInterval(watchdogInterval);
 
         scheduleReconnect();
     });
@@ -467,7 +510,8 @@ app.get('/api/health', (req, res) => {
         session_count: sessionCounter,
         missed_session_count: missedSessionCount,
         pending_dice: pendingDiceResult !== null,
-        committed_sessions_tracked: committedSessions.size
+        committed_sessions_tracked: committedSessions.size,
+        watchdog_same_count: sameSessionCount
     });
 });
 
@@ -535,11 +579,15 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`   ✅ /api/health   - Kiểm tra trạng thái`);
     console.log(`   ✅ /api/debug    - Thông tin debug`);
     console.log(`   ✅ /api/gaps     - Phiên bị mất`);
-    console.log(`=========================================\n`);
-    console.log(`[🔧 FIX] Đã áp dụng:`);
-    console.log(`   - Bỏ điều kiện lọc gBB (không bỏ qua gBB=false)`);
-    console.log(`   - Chống commit trùng cùng 1 phiên (committedSessions Set)`);
-    console.log(`   - Ưu tiên sid trong message 1003 trước khi dùng fallback`);
+    console.log(`=========================================`);
+    console.log(`\n[🔧 FIX] Đã áp dụng:`);
+    console.log(`   ✅ Bỏ lọc gBB (không bỏ qua gBB=false)`);
+    console.log(`   ✅ Chống commit trùng phiên`);
+    console.log(`   ✅ Ưu tiên sid trong message 1003`);
+    console.log(`   ✅ Bỏ qua join room khi sid không đổi`);
+    console.log(`   ✅ Watchdog tự reconnect khi sid bị stuck 2 phút`);
+    console.log(`   ✅ Lưu history file async (không block event loop)`);
+    console.log(`   ✅ Load history từ file khi khởi động`);
     console.log(`=========================================\n`);
 
     connectWebSocket();
