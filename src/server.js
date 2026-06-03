@@ -14,6 +14,7 @@ const PORT = process.env.PORT || 3001;
 const MONGODB_URI = process.env.MONGODB_URI;
 const WEBSOCKET_URL = "wss://websocket.azhkthg1.net/websocket?token=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhbW91bnQiOjAsInVzZXJuYW1lIjoiU0NfYXBpc3Vud2luMTIzIn0.hgrRbSV6vnBwJMg9ZFtbx3rRu9mX_hZMZ_m5gMNhkw0";
 const SELF_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+const MAX_HISTORY = 50; // Giới hạn đúng 50 phiên
 
 // ===== DATABASE =====
 let db = null;
@@ -44,7 +45,7 @@ async function connectMongoDB() {
 async function loadHistoryFromDB() {
     if (!historyCollection) return;
     try {
-        const docs = await historyCollection.find({}).sort({ session: -1 }).limit(500).toArray();
+        const docs = await historyCollection.find({}).sort({ session: -1 }).limit(MAX_HISTORY).toArray();
         patternHistory = docs.reverse().map(d => ({
             session: d.session,
             dice: d.dice,
@@ -72,10 +73,10 @@ async function saveHistoryToDB(entry) {
             { $set: entry },
             { upsert: true }
         );
-        // Clean up data cũ
+        // Clean up data cũ (giữ lại tối đa 50)
         const count = await historyCollection.countDocuments();
-        if (count > 500) {
-            const oldest = await historyCollection.find({}).sort({ session: 1 }).limit(count - 500).toArray();
+        if (count > MAX_HISTORY) {
+            const oldest = await historyCollection.find({}).sort({ session: 1 }).limit(count - MAX_HISTORY).toArray();
             const ids = oldest.map(d => d._id);
             await historyCollection.deleteMany({ _id: { $in: ids } });
         }
@@ -139,7 +140,7 @@ function safeSend(msg, label) {
     if (ws && ws.readyState === WebSocket.OPEN) {
         try {
             ws.send(JSON.stringify(msg));
-            // Tắt console.log gửi ping/heartbeat để đỡ rác log, chỉ log những lệnh quan trọng
+            // Tắt console.log gửi ping/heartbeat để đỡ rác log
             if (!label.includes('1005')) {
                 console.log(`[📤] Đã gửi: ${label}`);
             }
@@ -173,7 +174,7 @@ function commitResult(sessionId, d1, d2, d3, timestamp, source) {
         lastCommittedSessionId = sessionId;
         seenSessions.add(sessionId);
         committedSessions.add(sessionId);
-        if (committedSessions.size > 500) committedSessions.delete([...committedSessions][0]);
+        if (committedSessions.size > MAX_HISTORY) committedSessions.delete([...committedSessions][0]);
     }
 
     apiResponseData = {
@@ -186,7 +187,7 @@ function commitResult(sessionId, d1, d2, d3, timestamp, source) {
 
     const entry = { session: sessionId, dice: [d1, d2, d3], total, result, timestamp, source };
     patternHistory.push(entry);
-    if (patternHistory.length > 500) patternHistory.shift();
+    if (patternHistory.length > MAX_HISTORY) patternHistory.shift();
     saveHistoryToDB(entry);
 }
 
@@ -244,7 +245,7 @@ function connectWebSocket() {
             safeSend(heartbeatMessage, 'Heartbeat (1005)');
         }, 6000);
 
-        // Nới Watchdog lên 25s để tránh reconnect nhầm lúc server đang đếm ngược chậm
+        // Nới Watchdog lên 25s
         watchdogInterval = setInterval(() => {
             const now = Date.now();
             if (lastMessageTime && (now - lastMessageTime > 25000)) { 
@@ -271,13 +272,13 @@ function connectWebSocket() {
 
             handleSessionTracking(payload);
 
-            // BẢN VÁ QUAN TRỌNG: Server báo có phiên mới (1008) -> Xin Join phòng đó ngay (1007)
+            // Gói 1008 báo phiên mới
             if (cmd === 1008 && payload.sid) {
                 console.log(`[🎮] Server báo phiên mới: ${payload.sid}, đang xin Join...`);
                 safeSend([6, "MiniGame", "taixiuPlugin", { cmd: 1007, sid: payload.sid }], `Join Room (1007) sid=${payload.sid}`);
             }
 
-            // Xử lý gói tin trả Kết Quả (1003)
+            // Gói 1003 trả kết quả
             if (cmd === 1003) {
                 const { d1, d2, d3, sid } = payload;
                 if (!d1 || !d2 || !d3) return;
@@ -299,7 +300,7 @@ function connectWebSocket() {
                 }
             }
         } catch (e) {
-            // Im lặng bỏ qua lỗi parse
+            // Bỏ qua lỗi parse
         }
     });
 
@@ -340,36 +341,6 @@ function startKeepAlive() {
 // ===== APIs =====
 app.get('/', (req, res) => res.json(apiResponseData));
 app.get('/api/ket-qua', (req, res) => res.json(apiResponseData));
-app.get('/api/history', (req, res) => {
-    const limit = parseInt(req.query.limit) || 10;
-    res.json({
-        total: patternHistory.length,
-        limit,
-        data: patternHistory.slice(-limit),
-        latest: apiResponseData
-    });
-});
-app.get('/api/health', (req, res) => res.json({
-    status: 'online',
-    ws_state: ws ? ws.readyState : null,
-    uptime: process.uptime().toFixed(1),
-    messages_received: messageCount,
-    missed_sessions: missedSessionCount,
-    last_known_session: lastKnownSessionId
-}));
 
-// ===== START SERVER =====
-app.listen(PORT, '0.0.0.0', async () => {
-    console.log(`\n=== 🚀 KHỞI ĐỘNG CỖ MÁY CRAWL TÀI XỈU (ĐÃ FIX MẤT PHIÊN) ===`);
-    console.log(`[Port] ${PORT}`);
-    
-    await connectMongoDB();
-    startKeepAlive();
-    connectWebSocket();
-});
-
-process.on('SIGINT', () => {
-    console.log('\n[🛑] Tắt máy...');
-    if (ws) ws.terminate();
-    process.exit(0);
-});
+// ===== API LỊCH SỬ MỚI =====
+app.
