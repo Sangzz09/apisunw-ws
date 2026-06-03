@@ -121,14 +121,14 @@ const WS_HEADERS = {
     "Origin": "https://play.sun.win"
 };
 
-// Gửi ngay lập tức khi Connect (Gồm cả lệnh 1007 để force Join Room)
+// Gửi khởi tạo cơ bản
 const initialMessages = [
     [1, "MiniGame", "GM_apivopnhaan", "WangLin", {
         "info": "{\"ipAddress\":\"113.185.45.88\",\"wsToken\":\"eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJnZW5kZXIiOjAsImNhblZpZXdTdGF0IjpmYWxzZSwiZGlzcGxheU5hbWUiOiJwbGFtYW1hIiwiYm90IjowLCJpc01lcmNoYW50IjpmYWxzZSwidmVyaWZpZWRCYW5rQWNjb3VudCI6ZmFsc2UsInBsYXlFdmVudExvYmJ5IjpmYWxzZSwiY3VzdG9tZXJJZCI6MzMxNDgxMTYyLCJhZmZJZCI6IkdFTVdJTiIsImJhbm5lZCI6ZmFsc2UsImJyYW5kIjoiZ2VtIiwidGltZXN0YW1wIjoxNzY2NDc0NzgwMDA2LCJsb2NrR2FtZXMiOltdLCJhbW91bnQiOjAsImxvY2tDaGF0IjpmYWxzZSwicGhvbmVWZXJpZmllZCI6ZmFsc2UsImlwQWRkcmVzcyI6IjExMy4xODUuNDUuODgiLCJtdXRlIjpmYWxzZSwiYXZhdGFyIjoiaHR0cHM6Ly9pbWFnZXMuc3dpbnNob3AubmV0L2ltYWdlcy9hdmF0YXIvYXZhdGFyXzE4LnBuZyIsInBsYXRmb3JtSWQiOjUsInVzZXJJZCI6IjZhOGI0ZDM4LTFlYzEtNDUxYi1hYTA1LWYyZDkwYWFhNGM1MCIsInJlZ1RpbWUiOjE3NjY0NzQ3NTEzOTEsInBob25lIjoiIiwiZGVwb3NpdCI6ZmFsc2UsInVzZXJuYW1lIjoiR01fYXBpdm9wbmhhYW4ifQ.YFOscbeojWNlRo7490BtlzkDGYmwVpnlgOoh04oCJy4\",\"locale\":\"vi\",\"userId\":\"6a8b4d38-1ec1-451b-aa05-f2d90aaa4c50\",\"username\":\"GM_apivopnhaan\",\"timestamp\":1766474780007,\"refreshToken\":\"63d5c9be0c494b74b53ba150d69039fd.7592f06d63974473b4aaa1ea849b2940\"}",
         "signature": "66772A1641AA8B18BD99207CE448EA00ECA6D8A4D457C1FF13AB092C22C8DECF0C0014971639A0FBA9984701A91FCCBE3056ABC1BE1541D1C198AA18AF3C45595AF6601F8B048947ADF8F48A9E3E074162F9BA3E6C0F7543D38BD54FD4C0A2C56D19716CC5353BBC73D12C3A92F78C833F4EFFDC4AB99E55C77AD2CDFA91E296"
     }],
     [6, "MiniGame", "lobbyPlugin", { cmd: 10001 }],
-    [6, "MiniGame", "taixiuPlugin", { cmd: 1007 }] // <-- FIX QUAN TRỌNG: Ép join room ngay lập tức
+    [6, "MiniGame", "taixiuPlugin", { cmd: 1007 }] // Join room không có sid để lấy luồng ban đầu
 ];
 
 const heartbeatMessage = [6, "MiniGame", "taixiuPlugin", { cmd: 1005 }];
@@ -139,6 +139,10 @@ function safeSend(msg, label) {
     if (ws && ws.readyState === WebSocket.OPEN) {
         try {
             ws.send(JSON.stringify(msg));
+            // Tắt console.log gửi ping/heartbeat để đỡ rác log, chỉ log những lệnh quan trọng
+            if (!label.includes('1005')) {
+                console.log(`[📤] Đã gửi: ${label}`);
+            }
         } catch (err) {
             console.error(`[❌] Lỗi gửi ${label}:`, err.message);
         }
@@ -187,7 +191,6 @@ function commitResult(sessionId, d1, d2, d3, timestamp, source) {
 }
 
 function handleSessionTracking(data) {
-    // Cập nhật session liên tục nếu gói tin có chứa sid (từ 1004, 1008, 1001...)
     if (data && data.sid && data.sid !== currentSessionId) {
         currentSessionId = data.sid;
         lastKnownSessionId = data.sid;
@@ -220,7 +223,7 @@ function connectWebSocket() {
     }
 
     ws.on('open', () => {
-        console.log('[✅] Kết nối thành công! Đang kích hoạt Join Room...');
+        console.log('[✅] Kết nối thành công!');
         wsConnectedAt = Date.now();
         lastMessageTime = Date.now();
         reconnectAttempts = 0;
@@ -231,21 +234,21 @@ function connectWebSocket() {
             setTimeout(() => safeSend(msg, `Init[${i}]`), i * 300);
         });
 
-        // 1. WS Ping chuẩn
+        // Ping chuẩn
         pingInterval = setInterval(() => {
             if (ws?.readyState === WebSocket.OPEN) ws.ping();
         }, 20000);
 
-        // 2. Heartbeat Server (Game ping)
+        // Heartbeat Game
         heartbeatInterval = setInterval(() => {
             safeSend(heartbeatMessage, 'Heartbeat (1005)');
         }, 6000);
 
-        // 3. SILENCE WATCHDOG: Cực kỳ quan trọng để chống Zombie Connection
+        // Nới Watchdog lên 25s để tránh reconnect nhầm lúc server đang đếm ngược chậm
         watchdogInterval = setInterval(() => {
             const now = Date.now();
-            if (lastMessageTime && (now - lastMessageTime > 15000)) { // 15s im lặng -> Đứt mạng ngầm
-                console.log(`[🚨 WATCHDOG] Bị kẹt dữ liệu (15s không có data mới). Force Reconnect!`);
+            if (lastMessageTime && (now - lastMessageTime > 25000)) { 
+                console.log(`[🚨 WATCHDOG] Bị kẹt dữ liệu (25s im lặng). Force Reconnect!`);
                 isIntentionalClose = true;
                 ws.terminate();
                 scheduleReconnect();
@@ -261,13 +264,18 @@ function connectWebSocket() {
             const rawData = message.toString();
             const data = JSON.parse(rawData);
 
-            // Bỏ qua nếu cấu trúc không chuẩn
             if (!Array.isArray(data) || typeof data[1] !== 'object' || data[1] === null) return;
             
             const payload = data[1];
             const cmd = payload.cmd;
 
             handleSessionTracking(payload);
+
+            // BẢN VÁ QUAN TRỌNG: Server báo có phiên mới (1008) -> Xin Join phòng đó ngay (1007)
+            if (cmd === 1008 && payload.sid) {
+                console.log(`[🎮] Server báo phiên mới: ${payload.sid}, đang xin Join...`);
+                safeSend([6, "MiniGame", "taixiuPlugin", { cmd: 1007, sid: payload.sid }], `Join Room (1007) sid=${payload.sid}`);
+            }
 
             // Xử lý gói tin trả Kết Quả (1003)
             if (cmd === 1003) {
@@ -280,7 +288,6 @@ function connectWebSocket() {
                 if (resolvedSid) {
                     commitResult(resolvedSid, d1, d2, d3, receiveTime, '1003');
                 } else {
-                    // Cứu cánh cuối cùng nếu vẫn không biết SID
                     pendingDiceResult = { d1, d2, d3, timestamp: receiveTime };
                     clearTimeout(pendingDiceTimer);
                     pendingDiceTimer = setTimeout(() => {
@@ -292,7 +299,7 @@ function connectWebSocket() {
                 }
             }
         } catch (e) {
-            // Im lặng bỏ qua lỗi parse json rác
+            // Im lặng bỏ qua lỗi parse
         }
     });
 
@@ -317,7 +324,7 @@ function cleanupAndReconnect() {
 
 function scheduleReconnect() {
     clearTimeout(reconnectTimeout);
-    const delay = reconnectAttempts < 5 ? 1000 : 3000; // Tránh spam quá mức
+    const delay = reconnectAttempts < 5 ? 1000 : 3000;
     console.log(`[⏳] Reconnect sau ${delay}ms...`);
     reconnectTimeout = setTimeout(connectWebSocket, delay);
 }
@@ -353,7 +360,7 @@ app.get('/api/health', (req, res) => res.json({
 
 // ===== START SERVER =====
 app.listen(PORT, '0.0.0.0', async () => {
-    console.log(`\n=== 🚀 KHỞI ĐỘNG CỖ MÁY CRAWL TÀI XỈU ===`);
+    console.log(`\n=== 🚀 KHỞI ĐỘNG CỖ MÁY CRAWL TÀI XỈU (ĐÃ FIX MẤT PHIÊN) ===`);
     console.log(`[Port] ${PORT}`);
     
     await connectMongoDB();
