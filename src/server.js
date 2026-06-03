@@ -21,12 +21,12 @@ let apiResponseData = {
 
 // ===== SESSION MANAGEMENT =====
 let currentSessionId = null;
-let lastKnownSessionId = null;   // GIỮ LẠI phiên cuối cùng khi reconnect
-let sessionCounter = 0;          // Đếm số phiên đã nhận trong session WS này
+let lastKnownSessionId = null;
+let sessionCounter = 0;
 
-// Buffer chứa kết quả dice đang chờ sid (tránh mất kết quả khi 1003 đến trước 1008)
+// Buffer chứa kết quả dice đang chờ sid
 let pendingDiceResult = null;
-const PENDING_DICE_TIMEOUT = 5000; // 5 giây chờ sid
+const PENDING_DICE_TIMEOUT = 5000;
 
 const patternHistory = [];
 
@@ -43,6 +43,9 @@ const WS_HEADERS = {
 const RECONNECT_DELAY = 2000;
 const PING_INTERVAL = 25000;
 const HEARTBEAT_INTERVAL = 5000;
+
+// Danh sách cmd đã biết — dùng để lọc log cmd lạ
+const KNOWN_CMDS = [1003, 1005, 1007, 1008, 1011, 10000, 10001];
 
 const initialMessages = [
     [
@@ -65,7 +68,7 @@ let ws = null;
 let pingInterval = null;
 let heartbeatInterval = null;
 let reconnectTimeout = null;
-let pendingDiceTimer = null;    // Timer flush pending dice khi không có sid
+let pendingDiceTimer = null;
 let wsConnectedAt = null;
 let messageCount = 0;
 let lastMessageTime = null;
@@ -86,13 +89,25 @@ const getNetworkInfo = () => {
     return { localIP };
 };
 
+// ===== GỬI MESSAGE AN TOÀN =====
+function safeSend(msg, label) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+        try {
+            ws.send(JSON.stringify(msg));
+            console.log(`[📤] Gửi: ${label}`);
+        } catch (err) {
+            console.error(`[❌] Lỗi gửi ${label}:`, err.message);
+        }
+    } else {
+        console.warn(`[⚠️] Không thể gửi ${label} — WS chưa OPEN`);
+    }
+}
+
 // ===== COMMIT KẾT QUẢ VÀO STATE =====
-// Tách ra hàm riêng để tái sử dụng (flush từ pending hoặc commit trực tiếp)
 function commitResult(sessionId, d1, d2, d3, timestamp) {
     const total = d1 + d2 + d3;
     const result = (total >= 11) ? "Tài" : "Xỉu";
 
-    // Cập nhật lastKnownSessionId ngay khi commit
     if (sessionId) lastKnownSessionId = sessionId;
 
     apiResponseData = {
@@ -122,15 +137,12 @@ function commitResult(sessionId, d1, d2, d3, timestamp) {
 }
 
 // ===== XỬ LÝ PENDING DICE =====
-// Gọi khi nhận được 1003 nhưng chưa có sid — lưu tạm, chờ 1008
 function storePendingDice(d1, d2, d3, timestamp) {
-    // Hủy timer cũ nếu có (tránh flush 2 lần)
     if (pendingDiceTimer) clearTimeout(pendingDiceTimer);
 
     pendingDiceResult = { d1, d2, d3, timestamp };
-    console.log(`[⏳] Lưu pending dice: ${d1}-${d2}-${d3}, chờ sid tối đa ${PENDING_DICE_TIMEOUT/1000}s...`);
+    console.log(`[⏳] Lưu pending dice: ${d1}-${d2}-${d3}, chờ sid tối đa ${PENDING_DICE_TIMEOUT / 1000}s...`);
 
-    // Nếu quá thời gian mà không có sid → dùng lastKnownSessionId hoặc "UNKNOWN"
     pendingDiceTimer = setTimeout(() => {
         if (pendingDiceResult) {
             const fallbackSession = lastKnownSessionId || 'UNKNOWN';
@@ -142,9 +154,8 @@ function storePendingDice(d1, d2, d3, timestamp) {
     }, PENDING_DICE_TIMEOUT);
 }
 
-// ===== XỬ LÝ SID MỚI =====
-// Nếu có pending dice đang chờ → flush ngay với sid mới
-function handleNewSession(sid) {
+// ===== XỬ LÝ PHIÊN MỚI =====
+function handleNewSession(sid, rawData) {
     const isNewSession = currentSessionId !== sid;
     currentSessionId = sid;
     lastKnownSessionId = sid;
@@ -153,6 +164,15 @@ function handleNewSession(sid) {
         sessionCounter++;
         console.log(`[🎮] Phiên mới bắt đầu: ${sid} (tổng phiên: ${sessionCounter})`);
     }
+
+    // ── LOG RAW DATA của cmd=1008 để debug protocol ──
+    console.log(`[1008 RAW] sid=${sid}`, JSON.stringify(rawData));
+
+    // ── TỰ ĐỘNG GỬI JOIN ROOM với sid mới ──
+    // cmd=1007 là lệnh join game/room phổ biến trong các game WS kiểu này
+    // Nếu log raw 1008 cho thấy field khác (roomId, tableId...) thì điều chỉnh payload bên dưới
+    const joinRoomMsg = [6, "MiniGame", "taixiuPlugin", { cmd: 1007, sid: sid }];
+    safeSend(joinRoomMsg, `join room (cmd=1007, sid=${sid})`);
 
     // Flush pending dice nếu có
     if (pendingDiceResult) {
@@ -175,9 +195,6 @@ function connectWebSocket() {
         ws.removeAllListeners();
         try { ws.terminate(); } catch (_) {}
     }
-
-    // KHÔNG reset currentSessionId khi reconnect — giữ lại để tránh mất phiên
-    // currentSessionId chỉ được ghi mới khi nhận cmd 1008
 
     reconnectAttempts++;
     console.log(`[🔄] Đang kết nối WebSocket... (lần thứ ${reconnectAttempts}) | Phiên cuối: ${lastKnownSessionId || 'chưa có'}`);
@@ -205,14 +222,7 @@ function connectWebSocket() {
 
         initialMessages.forEach((msg, i) => {
             setTimeout(() => {
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                    try {
-                        ws.send(JSON.stringify(msg));
-                        console.log(`[📤] Gửi message ${i + 1}/${initialMessages.length}`);
-                    } catch (error) {
-                        console.error(`[❌] Lỗi gửi message ${i + 1}:`, error.message);
-                    }
-                }
+                safeSend(msg, `initialMessage[${i + 1}/${initialMessages.length}]`);
             }, i * 500);
         });
 
@@ -234,12 +244,7 @@ function connectWebSocket() {
             if (ws && ws.readyState === WebSocket.OPEN) {
                 const now = Date.now();
                 if (lastMessageTime && (now - lastMessageTime) > 10000) {
-                    try {
-                        ws.send(JSON.stringify(heartbeatMessage));
-                        console.log('[💓] Gửi heartbeat...');
-                    } catch (error) {
-                        console.error('[❌] Lỗi gửi heartbeat:', error.message);
-                    }
+                    safeSend(heartbeatMessage, 'heartbeat (cmd=1005)');
                 }
             }
         }, HEARTBEAT_INTERVAL);
@@ -266,12 +271,17 @@ function connectWebSocket() {
 
             const { cmd, sid, d1, d2, d3, gBB } = data[1];
 
-            // ---- PHIÊN MỚI (cmd 1008) ----
-            if (cmd === 1008 && sid) {
-                handleNewSession(sid);
+            // ── LOG CMD LẠ — bắt mọi cmd chưa xử lý ──
+            if (cmd !== undefined && !KNOWN_CMDS.includes(cmd)) {
+                console.log(`[❓ CMD LẠ] cmd=${cmd}`, JSON.stringify(data[1]).slice(0, 400));
             }
 
-            // ---- KẾT QUẢ XÚC XẮC (cmd 1003) ----
+            // ── PHIÊN MỚI (cmd 1008) ──
+            if (cmd === 1008 && sid) {
+                handleNewSession(sid, data[1]);
+            }
+
+            // ── KẾT QUẢ XÚC XẮC (cmd 1003) ──
             if (cmd === 1003) {
                 console.log(`[🎲] Nhận cmd=1003: d1=${d1}, d2=${d2}, d3=${d3}, gBB=${gBB}, sid_inline=${sid || 'N/A'}`);
 
@@ -291,13 +301,17 @@ function connectWebSocket() {
                 const resolvedSid = sid || currentSessionId || lastKnownSessionId;
 
                 if (resolvedSid) {
-                    // Có sid → commit ngay
                     commitResult(resolvedSid, d1, d2, d3, receiveTime);
                 } else {
-                    // Chưa có sid → lưu pending, chờ cmd 1008
                     storePendingDice(d1, d2, d3, receiveTime);
                 }
             }
+
+            // ── LOG RAW cmd=1011 (thường là trạng thái phòng/game) ──
+            if (cmd === 1011) {
+                console.log(`[1011 RAW]`, JSON.stringify(data[1]).slice(0, 400));
+            }
+
         } catch (e) {
             console.error('[❌] Lỗi xử lý message:', e.message);
         }
@@ -328,7 +342,7 @@ function connectWebSocket() {
 function scheduleReconnect() {
     clearTimeout(reconnectTimeout);
     const delay = RECONNECT_DELAY * Math.min(reconnectAttempts + 1, 10);
-    console.log(`[⏳] Sẽ reconnect sau ${delay/1000}s... (phiên cuối giữ lại: ${lastKnownSessionId || 'N/A'})`);
+    console.log(`[⏳] Sẽ reconnect sau ${delay / 1000}s... (phiên cuối giữ lại: ${lastKnownSessionId || 'N/A'})`);
     reconnectTimeout = setTimeout(connectWebSocket, delay);
 }
 
@@ -373,7 +387,7 @@ app.get('/api/health', (req, res) => {
     const timeSinceLastMessage = lastMessageTime ? Math.floor((now - lastMessageTime) / 1000) : null;
     res.json({
         status: 'online',
-        websocket_state: ws ? ['CONNECTING','OPEN','CLOSING','CLOSED'][ws.readyState] : 'NULL',
+        websocket_state: ws ? ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'][ws.readyState] : 'NULL',
         websocket_connected: ws ? ws.readyState === WebSocket.OPEN : false,
         uptime_seconds: process.uptime().toFixed(2),
         memory: process.memoryUsage(),
@@ -382,7 +396,6 @@ app.get('/api/health', (req, res) => {
         last_message_seconds_ago: timeSinceLastMessage,
         reconnect_attempts: reconnectAttempts,
         connection_uptime: wsConnectedAt ? Math.floor((now - wsConnectedAt) / 1000) : null,
-        // Thêm thông tin session
         current_session: currentSessionId,
         last_known_session: lastKnownSessionId,
         session_count: sessionCounter,
