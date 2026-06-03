@@ -22,11 +22,19 @@ let apiResponseData = {
 // ===== SESSION MANAGEMENT =====
 let currentSessionId = null;
 let lastKnownSessionId = null;
+let lastCommittedSessionId = null;
 let sessionCounter = 0;
 
 // Buffer chứa kết quả dice đang chờ sid
 let pendingDiceResult = null;
 const PENDING_DICE_TIMEOUT = 5000;
+
+// ===== THEO DÕI PHIÊN BỊ MẤT =====
+const seenSessions = new Set();
+let missedSessionCount = 0;
+
+// ===== CHỐNG TRÙNG: lưu các sid đã commit =====
+const committedSessions = new Set();
 
 const patternHistory = [];
 
@@ -44,7 +52,6 @@ const RECONNECT_DELAY = 2000;
 const PING_INTERVAL = 25000;
 const HEARTBEAT_INTERVAL = 5000;
 
-// Danh sách cmd đã biết — dùng để lọc log cmd lạ
 const KNOWN_CMDS = [1003, 1005, 1007, 1008, 1011, 10000, 10001];
 
 const initialMessages = [
@@ -75,6 +82,8 @@ let lastMessageTime = null;
 let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 50;
 
+const reconnectLog = [];
+
 const getNetworkInfo = () => {
     const interfaces = os.networkInterfaces();
     let localIP = '127.0.0.1';
@@ -103,12 +112,44 @@ function safeSend(msg, label) {
     }
 }
 
+// ===== PHÁT HIỆN PHIÊN BỊ MẤT =====
+function detectMissedSessions(newSid) {
+    if (!lastCommittedSessionId || !newSid) return;
+    const diff = newSid - lastCommittedSessionId;
+    if (diff > 1) {
+        missedSessionCount += (diff - 1);
+        const missed = [];
+        for (let i = lastCommittedSessionId + 1; i < newSid; i++) missed.push(i);
+        console.log(`[🚨 MẤT PHIÊN] Nhảy từ ${lastCommittedSessionId} → ${newSid}, bị mất ${diff - 1} phiên: [${missed.join(', ')}]`);
+        console.log(`[📊] Tổng phiên bị mất từ đầu: ${missedSessionCount}`);
+    }
+}
+
 // ===== COMMIT KẾT QUẢ VÀO STATE =====
-function commitResult(sessionId, d1, d2, d3, timestamp) {
+function commitResult(sessionId, d1, d2, d3, timestamp, source) {
+    // ===== FIX #1: CHỐNG COMMIT TRÙNG CÙNG 1 PHIÊN =====
+    if (sessionId && committedSessions.has(sessionId)) {
+        console.log(`[⚠️ SKIP] Phiên ${sessionId} đã được commit rồi, bỏ qua duplicate từ [${source}]`);
+        return;
+    }
+
     const total = d1 + d2 + d3;
     const result = (total >= 11) ? "Tài" : "Xỉu";
 
-    if (sessionId) lastKnownSessionId = sessionId;
+    // Kiểm tra phiên bị mất trước khi commit
+    detectMissedSessions(sessionId);
+
+    if (sessionId) {
+        lastKnownSessionId = sessionId;
+        lastCommittedSessionId = sessionId;
+        seenSessions.add(sessionId);
+        committedSessions.add(sessionId);   // đánh dấu đã commit
+        // Giới hạn bộ nhớ set
+        if (committedSessions.size > 500) {
+            const firstKey = committedSessions.values().next().value;
+            committedSessions.delete(firstKey);
+        }
+    }
 
     apiResponseData = {
         "Phien": sessionId,
@@ -122,7 +163,7 @@ function commitResult(sessionId, d1, d2, d3, timestamp) {
         "update_count": (apiResponseData.update_count || 0) + 1
     };
 
-    console.log(`[🎲✅] KẾT QUẢ: Phiên ${sessionId}: ${d1}-${d2}-${d3} = ${total} (${result}) | ${timestamp}`);
+    console.log(`[🎲✅] KẾT QUẢ [${source}]: Phiên ${sessionId}: ${d1}-${d2}-${d3} = ${total} (${result}) | ${timestamp}`);
     console.log(`[ℹ️] Tổng số lần cập nhật: ${apiResponseData.update_count}`);
 
     patternHistory.push({
@@ -130,10 +171,11 @@ function commitResult(sessionId, d1, d2, d3, timestamp) {
         dice: [d1, d2, d3],
         total,
         result,
-        timestamp
+        timestamp,
+        source
     });
 
-    if (patternHistory.length > 100) patternHistory.shift();
+    if (patternHistory.length > 50) patternHistory.shift();
 }
 
 // ===== XỬ LÝ PENDING DICE =====
@@ -148,7 +190,7 @@ function storePendingDice(d1, d2, d3, timestamp) {
             const fallbackSession = lastKnownSessionId || 'UNKNOWN';
             console.log(`[⚠️] Hết thời gian chờ sid, commit với phiên fallback: ${fallbackSession}`);
             const { d1, d2, d3, timestamp } = pendingDiceResult;
-            commitResult(fallbackSession, d1, d2, d3, timestamp);
+            commitResult(fallbackSession, d1, d2, d3, timestamp, 'pending-timeout');
             pendingDiceResult = null;
         }
     }, PENDING_DICE_TIMEOUT);
@@ -159,18 +201,16 @@ function handleNewSession(sid, rawData) {
     const isNewSession = currentSessionId !== sid;
     currentSessionId = sid;
     lastKnownSessionId = sid;
+    seenSessions.add(sid);
 
     if (isNewSession) {
         sessionCounter++;
-        console.log(`[🎮] Phiên mới bắt đầu: ${sid} (tổng phiên: ${sessionCounter})`);
+        console.log(`[🎮] Phiên mới bắt đầu: ${sid} (tổng phiên nhận: ${sessionCounter})`);
     }
 
-    // ── LOG RAW DATA của cmd=1008 để debug protocol ──
     console.log(`[1008 RAW] sid=${sid}`, JSON.stringify(rawData));
 
-    // ── TỰ ĐỘNG GỬI JOIN ROOM với sid mới ──
-    // cmd=1007 là lệnh join game/room phổ biến trong các game WS kiểu này
-    // Nếu log raw 1008 cho thấy field khác (roomId, tableId...) thì điều chỉnh payload bên dưới
+    // Gửi join room
     const joinRoomMsg = [6, "MiniGame", "taixiuPlugin", { cmd: 1007, sid: sid }];
     safeSend(joinRoomMsg, `join room (cmd=1007, sid=${sid})`);
 
@@ -181,7 +221,37 @@ function handleNewSession(sid, rawData) {
         const { d1, d2, d3, timestamp } = pendingDiceResult;
         pendingDiceResult = null;
         console.log(`[🔗] Flush pending dice với sid mới ${sid}`);
-        commitResult(sid, d1, d2, d3, timestamp);
+        commitResult(sid, d1, d2, d3, timestamp, 'pending-flush');
+    }
+}
+
+// ===== FIX #2: XỬ LÝ cmd=1003 — BỎ ĐIỀU KIỆN gBB, DÙNG SID TRONG MESSAGE =====
+function handle1003(data1) {
+    const { d1, d2, d3, sid, gBB } = data1;
+
+    console.log(`[🎲] cmd=1003: d1=${d1}, d2=${d2}, d3=${d3}, gBB=${gBB}, sid=${sid || 'N/A'}`);
+
+    // Phải có đủ xúc xắc
+    if (!d1 || !d2 || !d3) {
+        console.log('[⚠️] Thiếu d1/d2/d3, bỏ qua. raw=', JSON.stringify(data1));
+        return;
+    }
+
+    // Track sid dù có xử lý hay không
+    if (sid) seenSessions.add(sid);
+
+    // ===== FIX CHÍNH: không lọc theo gBB nữa =====
+    // gBB=false vẫn có thể là kết quả thật, chỉ là trạng thái game server
+    // Ưu tiên: sid trong message 1003 > currentSessionId > lastKnownSessionId
+    const resolvedSid = sid || currentSessionId || lastKnownSessionId;
+    const receiveTime = new Date().toISOString();
+
+    if (resolvedSid) {
+        commitResult(resolvedSid, d1, d2, d3, receiveTime,
+            sid ? '1003-sid' : (currentSessionId ? '1003-current' : '1003-last'));
+    } else {
+        console.log('[⚠️] Không có sid nào, lưu pending...');
+        storePendingDice(d1, d2, d3, receiveTime);
     }
 }
 
@@ -216,6 +286,9 @@ function connectWebSocket() {
         reconnectAttempts = 0;
         messageCount = 0;
         lastMessageTime = Date.now();
+
+        reconnectLog.push({ time: new Date().toISOString(), type: 'connect', lastSession: lastKnownSessionId });
+        if (reconnectLog.length > 20) reconnectLog.shift();
 
         console.log('[✅] WebSocket đã kết nối đến Sun.Win');
         console.log('[ℹ️] Đang gửi messages khởi tạo...');
@@ -269,45 +342,24 @@ function connectWebSocket() {
 
             if (!Array.isArray(data) || typeof data[1] !== 'object' || data[1] === null) return;
 
-            const { cmd, sid, d1, d2, d3, gBB } = data[1];
+            const { cmd } = data[1];
 
-            // ── LOG CMD LẠ — bắt mọi cmd chưa xử lý ──
+            // Log cmd lạ
             if (cmd !== undefined && !KNOWN_CMDS.includes(cmd)) {
                 console.log(`[❓ CMD LẠ] cmd=${cmd}`, JSON.stringify(data[1]).slice(0, 400));
             }
 
             // ── PHIÊN MỚI (cmd 1008) ──
-            if (cmd === 1008 && sid) {
-                handleNewSession(sid, data[1]);
+            if (cmd === 1008 && data[1].sid) {
+                handleNewSession(data[1].sid, data[1]);
             }
 
             // ── KẾT QUẢ XÚC XẮC (cmd 1003) ──
             if (cmd === 1003) {
-                console.log(`[🎲] Nhận cmd=1003: d1=${d1}, d2=${d2}, d3=${d3}, gBB=${gBB}, sid_inline=${sid || 'N/A'}`);
-
-                if (!gBB) {
-                    console.log('[⚠️] gBB=false/null, bỏ qua (phiên chưa kết thúc)');
-                    return;
-                }
-
-                if (!d1 || !d2 || !d3) {
-                    console.log('[⚠️] Thiếu dữ liệu xúc xắc, bỏ qua');
-                    return;
-                }
-
-                const receiveTime = new Date().toISOString();
-
-                // Ưu tiên: sid trong message > currentSessionId > lastKnownSessionId
-                const resolvedSid = sid || currentSessionId || lastKnownSessionId;
-
-                if (resolvedSid) {
-                    commitResult(resolvedSid, d1, d2, d3, receiveTime);
-                } else {
-                    storePendingDice(d1, d2, d3, receiveTime);
-                }
+                handle1003(data[1]);
             }
 
-            // ── LOG RAW cmd=1011 (thường là trạng thái phòng/game) ──
+            // Log raw cmd=1011
             if (cmd === 1011) {
                 console.log(`[1011 RAW]`, JSON.stringify(data[1]).slice(0, 400));
             }
@@ -321,7 +373,10 @@ function connectWebSocket() {
         const uptime = wsConnectedAt ? ((Date.now() - wsConnectedAt) / 1000).toFixed(1) + 's' : 'N/A';
         const reasonStr = reason ? reason.toString() : '';
         console.log(`[🔌] WebSocket đóng. Code: ${code}, Reason: ${reasonStr}, Uptime: ${uptime}`);
-        console.log(`[ℹ️] Tổng messages đã nhận: ${messageCount} | Phiên cuối: ${lastKnownSessionId || 'N/A'}`);
+        console.log(`[ℹ️] Tổng messages đã nhận: ${messageCount} | Phiên cuối commit: ${lastCommittedSessionId || 'N/A'}`);
+
+        reconnectLog.push({ time: new Date().toISOString(), type: 'disconnect', code, uptime, lastSession: lastCommittedSessionId });
+        if (reconnectLog.length > 20) reconnectLog.shift();
 
         clearInterval(pingInterval);
         clearInterval(heartbeatInterval);
@@ -342,7 +397,7 @@ function connectWebSocket() {
 function scheduleReconnect() {
     clearTimeout(reconnectTimeout);
     const delay = RECONNECT_DELAY * Math.min(reconnectAttempts + 1, 10);
-    console.log(`[⏳] Sẽ reconnect sau ${delay / 1000}s... (phiên cuối giữ lại: ${lastKnownSessionId || 'N/A'})`);
+    console.log(`[⏳] Sẽ reconnect sau ${delay / 1000}s... (phiên cuối: ${lastKnownSessionId || 'N/A'})`);
     reconnectTimeout = setTimeout(connectWebSocket, delay);
 }
 
@@ -398,8 +453,11 @@ app.get('/api/health', (req, res) => {
         connection_uptime: wsConnectedAt ? Math.floor((now - wsConnectedAt) / 1000) : null,
         current_session: currentSessionId,
         last_known_session: lastKnownSessionId,
+        last_committed_session: lastCommittedSessionId,
         session_count: sessionCounter,
-        pending_dice: pendingDiceResult !== null
+        missed_session_count: missedSessionCount,
+        pending_dice: pendingDiceResult !== null,
+        committed_sessions_tracked: committedSessions.size
     });
 });
 
@@ -408,10 +466,17 @@ app.get('/api/debug', (req, res) => {
         apiData: apiResponseData,
         currentSessionId,
         lastKnownSessionId,
+        lastCommittedSessionId,
         sessionCounter,
+        missedSessionCount,
+        seenSessionsCount: seenSessions.size,
+        recentSeenSessions: [...seenSessions].slice(-20),
+        committedSessionsCount: committedSessions.size,
+        recentCommittedSessions: [...committedSessions].slice(-20),
         pendingDiceResult,
         historyCount: patternHistory.length,
         lastHistoryItem: patternHistory[patternHistory.length - 1] || null,
+        reconnectLog,
         wsStatus: {
             connected: ws ? ws.readyState === WebSocket.OPEN : false,
             state: ws ? ws.readyState : null,
@@ -420,6 +485,26 @@ app.get('/api/debug', (req, res) => {
             lastMessageTime,
             reconnectAttempts
         }
+    });
+});
+
+app.get('/api/gaps', (req, res) => {
+    const sessions = [...seenSessions].sort((a, b) => a - b);
+    const gaps = [];
+    for (let i = 1; i < sessions.length; i++) {
+        const diff = sessions[i] - sessions[i - 1];
+        if (diff > 1) {
+            const missing = [];
+            for (let j = sessions[i - 1] + 1; j < sessions[i]; j++) missing.push(j);
+            gaps.push({ from: sessions[i - 1], to: sessions[i], missing });
+        }
+    }
+    res.json({
+        total_seen: sessions.length,
+        total_gaps: gaps.length,
+        total_missed: missedSessionCount,
+        gaps,
+        all_sessions: sessions
     });
 });
 
@@ -439,6 +524,12 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`   ✅ /api/history  - Lịch sử kết quả`);
     console.log(`   ✅ /api/health   - Kiểm tra trạng thái`);
     console.log(`   ✅ /api/debug    - Thông tin debug`);
+    console.log(`   ✅ /api/gaps     - Phiên bị mất`);
+    console.log(`=========================================\n`);
+    console.log(`[🔧 FIX] Đã áp dụng:`);
+    console.log(`   - Bỏ điều kiện lọc gBB (không bỏ qua gBB=false)`);
+    console.log(`   - Chống commit trùng cùng 1 phiên (committedSessions Set)`);
+    console.log(`   - Ưu tiên sid trong message 1003 trước khi dùng fallback`);
     console.log(`=========================================\n`);
 
     connectWebSocket();
