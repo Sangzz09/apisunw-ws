@@ -2,24 +2,111 @@ const WebSocket = require('ws');
 const express = require('express');
 const cors = require('cors');
 const os = require('os');
-const fs = require('fs');
+const https = require('https');
+const http = require('http');
+const { MongoClient } = require('mongodb');
 
 const app = express();
 app.use(cors());
 const PORT = process.env.PORT || 3001;
-const HISTORY_FILE = './history.json';
 
-// ===== LOAD HISTORY TỪ FILE =====
-let patternHistory = [];
-try {
-    if (fs.existsSync(HISTORY_FILE)) {
-        const raw = fs.readFileSync(HISTORY_FILE, 'utf8');
-        patternHistory = JSON.parse(raw);
-        console.log(`[📂] Đã load ${patternHistory.length} phiên từ file`);
+// ===== MONGODB SETUP =====
+const MONGODB_URI = process.env.MONGODB_URI;
+let db = null;
+let historyCollection = null;
+
+async function connectMongoDB() {
+    if (!MONGODB_URI) {
+        console.error('[❌] MONGODB_URI chưa được set! Lịch sử sẽ không được lưu.');
+        return;
     }
-} catch (e) {
-    console.error('[❌] Lỗi load history:', e.message);
-    patternHistory = [];
+    try {
+        const client = new MongoClient(MONGODB_URI, {
+            serverSelectionTimeoutMS: 5000,
+            connectTimeoutMS: 10000,
+        });
+        await client.connect();
+        db = client.db('sunwin');
+        historyCollection = db.collection('history');
+        // Tạo index để query nhanh hơn
+        await historyCollection.createIndex({ session: -1 });
+        console.log('[✅ MongoDB] Kết nối thành công!');
+
+        // Load lịch sử từ DB
+        await loadHistoryFromDB();
+    } catch (err) {
+        console.error('[❌ MongoDB] Lỗi kết nối:', err.message);
+    }
+}
+
+async function loadHistoryFromDB() {
+    if (!historyCollection) return;
+    try {
+        const docs = await historyCollection
+            .find({})
+            .sort({ session: -1 })
+            .limit(500)
+            .toArray();
+        patternHistory = docs.reverse().map(d => ({
+            session: d.session,
+            dice: d.dice,
+            total: d.total,
+            result: d.result,
+            timestamp: d.timestamp,
+            source: d.source
+        }));
+        console.log(`[📂 MongoDB] Đã load ${patternHistory.length} phiên từ DB`);
+        if (patternHistory.length > 0) {
+            const last = patternHistory[patternHistory.length - 1];
+            lastKnownSessionId = last.session;
+            lastCommittedSessionId = last.session;
+            console.log(`[📂 MongoDB] Phiên cuối: ${last.session}`);
+        }
+    } catch (err) {
+        console.error('[❌ MongoDB] Lỗi load history:', err.message);
+    }
+}
+
+async function saveHistoryToDB(entry) {
+    if (!historyCollection) return;
+    try {
+        // Upsert để tránh trùng lặp
+        await historyCollection.updateOne(
+            { session: entry.session },
+            { $set: entry },
+            { upsert: true }
+        );
+        // Giữ tối đa 500 phiên, xóa cũ nhất
+        const count = await historyCollection.countDocuments();
+        if (count > 500) {
+            const oldest = await historyCollection
+                .find({})
+                .sort({ session: 1 })
+                .limit(count - 500)
+                .toArray();
+            const ids = oldest.map(d => d._id);
+            await historyCollection.deleteMany({ _id: { $in: ids } });
+        }
+    } catch (err) {
+        console.error('[❌ MongoDB] Lỗi lưu history:', err.message);
+    }
+}
+
+// ===== KEEP-ALIVE: tự ping chính mình để Render không ngủ =====
+const SELF_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+let keepAliveInterval = null;
+
+function startKeepAlive() {
+    if (keepAliveInterval) clearInterval(keepAliveInterval);
+    keepAliveInterval = setInterval(() => {
+        const client = SELF_URL.startsWith('https') ? https : http;
+        client.get(`${SELF_URL}/api/health`, (res) => {
+            console.log(`[🏓 KEEP-ALIVE] Self ping OK: ${res.statusCode}`);
+        }).on('error', (e) => {
+            console.error('[❌ KEEP-ALIVE] Lỗi:', e.message);
+        });
+    }, 4 * 60 * 1000); // mỗi 4 phút
+    console.log(`[🏓 KEEP-ALIVE] Đã khởi động, ping ${SELF_URL} mỗi 4 phút`);
 }
 
 let apiResponseData = {
@@ -40,20 +127,17 @@ let lastKnownSessionId = null;
 let lastCommittedSessionId = null;
 let sessionCounter = 0;
 
-// Buffer chứa kết quả dice đang chờ sid
 let pendingDiceResult = null;
 const PENDING_DICE_TIMEOUT = 5000;
 
-// ===== THEO DÕI PHIÊN BỊ MẤT =====
 const seenSessions = new Set();
 let missedSessionCount = 0;
-
-// ===== CHỐNG TRÙNG: lưu các sid đã commit =====
 const committedSessions = new Set();
 
-// ===== WATCHDOG: phát hiện sid bị stuck =====
 let sameSessionCount = 0;
 let lastCheckedSid = null;
+
+let patternHistory = [];
 
 const WEBSOCKET_URL = "wss://websocket.azhkthg1.net/websocket?token=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhbW91bnQiOjAsInVzZXJuYW1lIjoiU0NfYXBpc3Vud2luMTIzIn0.hgrRbSV6vnBwJMg9ZFtbx3rRu9mX_hZMZ_m5gMNhkw0";
 
@@ -68,8 +152,8 @@ const WS_HEADERS = {
 const RECONNECT_DELAY = 2000;
 const PING_INTERVAL = 25000;
 const HEARTBEAT_INTERVAL = 5000;
-const WATCHDOG_INTERVAL = 30000;   // kiểm tra mỗi 30 giây
-const WATCHDOG_MAX_SAME = 4;       // sau 4 lần (2 phút) → reconnect
+const WATCHDOG_INTERVAL = 30000;
+const WATCHDOG_MAX_SAME = 4;
 
 const KNOWN_CMDS = [1003, 1005, 1007, 1008, 1011, 10000, 10001];
 
@@ -118,14 +202,6 @@ const getNetworkInfo = () => {
     return { localIP };
 };
 
-// ===== LƯU HISTORY ASYNC =====
-function saveHistory() {
-    fs.writeFile(HISTORY_FILE, JSON.stringify(patternHistory), 'utf8', (err) => {
-        if (err) console.error('[❌] Lỗi lưu history:', err.message);
-    });
-}
-
-// ===== GỬI MESSAGE AN TOÀN =====
 function safeSend(msg, label) {
     if (ws && ws.readyState === WebSocket.OPEN) {
         try {
@@ -139,7 +215,6 @@ function safeSend(msg, label) {
     }
 }
 
-// ===== PHÁT HIỆN PHIÊN BỊ MẤT =====
 function detectMissedSessions(newSid) {
     if (!lastCommittedSessionId || !newSid) return;
     const diff = newSid - lastCommittedSessionId;
@@ -152,7 +227,6 @@ function detectMissedSessions(newSid) {
     }
 }
 
-// ===== COMMIT KẾT QUẢ VÀO STATE =====
 function commitResult(sessionId, d1, d2, d3, timestamp, source) {
     const strictSources = ['1003-sid', 'pending-flush', 'pending-timeout'];
     if (sessionId && committedSessions.has(sessionId) && strictSources.includes(source)) {
@@ -198,28 +272,26 @@ function commitResult(sessionId, d1, d2, d3, timestamp, source) {
     console.log(`[🎲✅] KẾT QUẢ [${source}]: Phiên ${sessionId}: ${d1}-${d2}-${d3} = ${total} (${result}) | ${timestamp}`);
     console.log(`[ℹ️] Tổng số lần cập nhật: ${apiResponseData.update_count}`);
 
-    patternHistory.push({
+    const entry = {
         session: sessionId,
         dice: [d1, d2, d3],
         total,
         result,
         timestamp,
         source
-    });
+    };
 
+    patternHistory.push(entry);
     if (patternHistory.length > 500) patternHistory.shift();
 
-    // Lưu file async, không block event loop
-    saveHistory();
+    // Lưu vào MongoDB async
+    saveHistoryToDB(entry);
 }
 
-// ===== XỬ LÝ PENDING DICE =====
 function storePendingDice(d1, d2, d3, timestamp) {
     if (pendingDiceTimer) clearTimeout(pendingDiceTimer);
-
     pendingDiceResult = { d1, d2, d3, timestamp };
     console.log(`[⏳] Lưu pending dice: ${d1}-${d2}-${d3}, chờ sid tối đa ${PENDING_DICE_TIMEOUT / 1000}s...`);
-
     pendingDiceTimer = setTimeout(() => {
         if (pendingDiceResult) {
             const fallbackSession = lastKnownSessionId || 'UNKNOWN';
@@ -231,14 +303,12 @@ function storePendingDice(d1, d2, d3, timestamp) {
     }, PENDING_DICE_TIMEOUT);
 }
 
-// ===== XỬ LÝ PHIÊN MỚI — FIX: bỏ qua join room trùng sid =====
 function handleNewSession(sid, rawData) {
     const isNewSession = currentSessionId !== sid;
     currentSessionId = sid;
     lastKnownSessionId = sid;
     seenSessions.add(sid);
 
-    // FIX: không gửi join room lại nếu sid không đổi
     if (!isNewSession) {
         console.log(`[⏭️] Bỏ qua join room trùng sid=${sid}`);
         return;
@@ -248,11 +318,9 @@ function handleNewSession(sid, rawData) {
     console.log(`[🎮] Phiên mới bắt đầu: ${sid} (tổng phiên nhận: ${sessionCounter})`);
     console.log(`[1008 RAW] sid=${sid}`, JSON.stringify(rawData));
 
-    // Gửi join room
     const joinRoomMsg = [6, "MiniGame", "taixiuPlugin", { cmd: 1007, sid: sid }];
     safeSend(joinRoomMsg, `join room (cmd=1007, sid=${sid})`);
 
-    // Flush pending dice nếu có
     if (pendingDiceResult) {
         if (pendingDiceTimer) clearTimeout(pendingDiceTimer);
         pendingDiceTimer = null;
@@ -263,22 +331,16 @@ function handleNewSession(sid, rawData) {
     }
 }
 
-// ===== XỬ LÝ cmd=1003 =====
 function handle1003(data1) {
     const { d1, d2, d3, sid, gBB } = data1;
-
     console.log(`[🎲] cmd=1003: d1=${d1}, d2=${d2}, d3=${d3}, gBB=${gBB}, sid=${sid || 'N/A'}`);
-
     if (!d1 || !d2 || !d3) {
         console.log('[⚠️] Thiếu d1/d2/d3, bỏ qua. raw=', JSON.stringify(data1));
         return;
     }
-
     if (sid) seenSessions.add(sid);
-
     const resolvedSid = sid || currentSessionId || lastKnownSessionId;
     const receiveTime = new Date().toISOString();
-
     if (resolvedSid) {
         commitResult(resolvedSid, d1, d2, d3, receiveTime,
             sid ? '1003-sid' : (currentSessionId ? '1003-current' : '1003-last'));
@@ -288,7 +350,6 @@ function handle1003(data1) {
     }
 }
 
-// ===== WATCHDOG: phát hiện và xử lý sid bị stuck =====
 function startWatchdog() {
     clearInterval(watchdogInterval);
     watchdogInterval = setInterval(() => {
@@ -375,7 +436,6 @@ function connectWebSocket() {
             }
         }, HEARTBEAT_INTERVAL);
 
-        // Khởi động watchdog
         startWatchdog();
     });
 
@@ -495,6 +555,7 @@ app.get('/api/health', (req, res) => {
     const timeSinceLastMessage = lastMessageTime ? Math.floor((now - lastMessageTime) / 1000) : null;
     res.json({
         status: 'online',
+        mongodb_connected: db !== null,
         websocket_state: ws ? ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'][ws.readyState] : 'NULL',
         websocket_connected: ws ? ws.readyState === WebSocket.OPEN : false,
         uptime_seconds: process.uptime().toFixed(2),
@@ -511,7 +572,8 @@ app.get('/api/health', (req, res) => {
         missed_session_count: missedSessionCount,
         pending_dice: pendingDiceResult !== null,
         committed_sessions_tracked: committedSessions.size,
-        watchdog_same_count: sameSessionCount
+        watchdog_same_count: sameSessionCount,
+        keep_alive_url: SELF_URL
     });
 });
 
@@ -562,8 +624,9 @@ app.get('/api/gaps', (req, res) => {
     });
 });
 
-// Khởi động server
-app.listen(PORT, '0.0.0.0', () => {
+// ========== KHỞI ĐỘNG ==========
+
+app.listen(PORT, '0.0.0.0', async () => {
     const networkInfo = getNetworkInfo();
     console.log(`\n=========================================`);
     console.log(`🚀 Sun.Win Data Stream Server`);
@@ -580,21 +643,27 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`   ✅ /api/debug    - Thông tin debug`);
     console.log(`   ✅ /api/gaps     - Phiên bị mất`);
     console.log(`=========================================`);
-    console.log(`\n[🔧 FIX] Đã áp dụng:`);
-    console.log(`   ✅ Bỏ lọc gBB (không bỏ qua gBB=false)`);
-    console.log(`   ✅ Chống commit trùng phiên`);
-    console.log(`   ✅ Ưu tiên sid trong message 1003`);
-    console.log(`   ✅ Bỏ qua join room khi sid không đổi`);
-    console.log(`   ✅ Watchdog tự reconnect khi sid bị stuck 2 phút`);
-    console.log(`   ✅ Lưu history file async (không block event loop)`);
-    console.log(`   ✅ Load history từ file khi khởi động`);
+    console.log(`\n[🔧 FIX v2] Đã áp dụng:`);
+    console.log(`   ✅ MongoDB Atlas thay thế history.json`);
+    console.log(`   ✅ Keep-alive tự ping mỗi 4 phút`);
+    console.log(`   ✅ Load history từ DB khi khởi động`);
+    console.log(`   ✅ Upsert để tránh trùng lặp`);
+    console.log(`   ✅ Watchdog tự reconnect khi sid bị stuck`);
     console.log(`=========================================\n`);
 
+    // Kết nối MongoDB trước
+    await connectMongoDB();
+
+    // Khởi động keep-alive
+    startKeepAlive();
+
+    // Kết nối WebSocket
     connectWebSocket();
 });
 
 process.on('SIGINT', () => {
     console.log('\n[🛑] Đang tắt server...');
     if (ws) ws.terminate();
+    clearInterval(keepAliveInterval);
     process.exit(0);
 });
