@@ -12,9 +12,11 @@ const PORT = process.env.PORT || 3001;
 
 // ===== CONFIGURATION =====
 const MONGODB_URI = process.env.MONGODB_URI;
-const WEBSOCKET_URL = "wss://websocket.azhkthg1.net/websocket?token=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJhbW91bnQiOjAsInVzZXJuYW1lIjoiU0NfYXBpc3Vud2luMTIzIn0.hgrRbSV6vnBwJMg9ZFtbx3rRu9mX_hZMZ_m5gMNhkw0";
+
+// 🔴 1. THAY TOKEN MỚI VÀO ĐÂY (NHỚ GIỮ NGUYÊN CHỮ wss://.../websocket?token=)
+const WEBSOCKET_URL = "wss://websocket.azhkthg1.net/websocket?token=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJnZW5kZXIiOjAsImNhblZpZXdTdGF0IjpmYWxzZSwiZGlzcGxheU5hbWUiOiJib3RydW1zdW53aW5zZXciLCJib3QiOjAsImlzTWVyY2hhbnQiOmZhbHNlLCJ2ZXJpZmllZEJhbmtBY2NvdW50IjpmYWxzZSwicGxheUV2ZW50TG9iYnkiOmZhbHNlLCJjdXN0b21lcklkIjozMzMzOTY2NzYsImFmZklkIjoic3VuLndpbiIsImJhbm5lZCI6ZmFsc2UsImJyYW5kIjoic3VuLndpbiIsImVtYWlsIjoiIiwidGltZXN0YW1wIjoxNzgwNTA5NTgxMjY0LCJsb2NrR2FtZXMiOltdLCJhbW91bnQiOjAsImxvY2tDaGF0IjpmYWxzZSwicGhvbmVWZXJpZmllZCI6dHJ1ZSwiaXBBZGRyZXNzIjoiMTQuMjQwLjIxLjIxMyIsIm11dGUiOmZhbHNlLCJhdmF0YXIiOiJodHRwczovL2ltYWdlcy5zd2luc2hvcC5uZXQvaW1hZ2VzL2F2YXRhci9hdmF0YXJfMDUucG5nIiwicGxhdGZvcm1JZCI6NCwidXNlcklkIjoiOTJmOTJlODAtZWM2Zi00NDk4LTkzMjQtMTE5NWIxZTg2NTE0IiwiZW1haWxWZXJpZmllZCI6bnVsbCwicmVnVGltZSI6MTc2NzgwMDQ0ODcxNywicGhvbmUiOiI4NDg4NjAyNzc2NyIsImRlcG9zaXQiOnRydWUsInVzZXJuYW1lIjoiU0Nfc2FuZ3p6MjAwOSJ9.EZL5SMU3Xno6BF0FuK5Ds7Jq-z2V-TH63hoqbdoMfTc";
+
 const SELF_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
-const MAX_HISTORY = 50; // Giới hạn đúng 50 phiên
 
 // ===== DATABASE =====
 let db = null;
@@ -45,7 +47,7 @@ async function connectMongoDB() {
 async function loadHistoryFromDB() {
     if (!historyCollection) return;
     try {
-        const docs = await historyCollection.find({}).sort({ session: -1 }).limit(MAX_HISTORY).toArray();
+        const docs = await historyCollection.find({}).sort({ session: -1 }).limit(500).toArray();
         patternHistory = docs.reverse().map(d => ({
             session: d.session,
             dice: d.dice,
@@ -73,10 +75,9 @@ async function saveHistoryToDB(entry) {
             { $set: entry },
             { upsert: true }
         );
-        // Clean up data cũ (giữ lại tối đa 50)
         const count = await historyCollection.countDocuments();
-        if (count > MAX_HISTORY) {
-            const oldest = await historyCollection.find({}).sort({ session: 1 }).limit(count - MAX_HISTORY).toArray();
+        if (count > 500) {
+            const oldest = await historyCollection.find({}).sort({ session: 1 }).limit(count - 500).toArray();
             const ids = oldest.map(d => d._id);
             await historyCollection.deleteMany({ _id: { $in: ids } });
         }
@@ -95,6 +96,7 @@ let ws = null;
 let currentSessionId = null;
 let lastKnownSessionId = null;
 let lastCommittedSessionId = null;
+let lastJoinedSid = null; // Tránh spam Join Room
 let sessionCounter = 0;
 let missedSessionCount = 0;
 
@@ -122,25 +124,25 @@ const WS_HEADERS = {
     "Origin": "https://play.sun.win"
 };
 
-// Gửi khởi tạo cơ bản
+// 🔴 2. THAY PHẦN INFO VÀ SIGNATURE MỚI VÀO ĐÂY
 const initialMessages = [
-    [1, "MiniGame", "GM_apivopnhaan", "WangLin", {
-        "info": "{\"ipAddress\":\"113.185.45.88\",\"wsToken\":\"eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJnZW5kZXIiOjAsImNhblZpZXdTdGF0IjpmYWxzZSwiZGlzcGxheU5hbWUiOiJwbGFtYW1hIiwiYm90IjowLCJpc01lcmNoYW50IjpmYWxzZSwidmVyaWZpZWRCYW5rQWNjb3VudCI6ZmFsc2UsInBsYXlFdmVudExvYmJ5IjpmYWxzZSwiY3VzdG9tZXJJZCI6MzMxNDgxMTYyLCJhZmZJZCI6IkdFTVdJTiIsImJhbm5lZCI6ZmFsc2UsImJyYW5kIjoiZ2VtIiwidGltZXN0YW1wIjoxNzY2NDc0NzgwMDA2LCJsb2NrR2FtZXMiOltdLCJhbW91bnQiOjAsImxvY2tDaGF0IjpmYWxzZSwicGhvbmVWZXJpZmllZCI6ZmFsc2UsImlwQWRkcmVzcyI6IjExMy4xODUuNDUuODgiLCJtdXRlIjpmYWxzZSwiYXZhdGFyIjoiaHR0cHM6Ly9pbWFnZXMuc3dpbnNob3AubmV0L2ltYWdlcy9hdmF0YXIvYXZhdGFyXzE4LnBuZyIsInBsYXRmb3JtSWQiOjUsInVzZXJJZCI6IjZhOGI0ZDM4LTFlYzEtNDUxYi1hYTA1LWYyZDkwYWFhNGM1MCIsInJlZ1RpbWUiOjE3NjY0NzQ3NTEzOTEsInBob25lIjoiIiwiZGVwb3NpdCI6ZmFsc2UsInVzZXJuYW1lIjoiR01fYXBpdm9wbmhhYW4ifQ.YFOscbeojWNlRo7490BtlzkDGYmwVpnlgOoh04oCJy4\",\"locale\":\"vi\",\"userId\":\"6a8b4d38-1ec1-451b-aa05-f2d90aaa4c50\",\"username\":\"GM_apivopnhaan\",\"timestamp\":1766474780007,\"refreshToken\":\"63d5c9be0c494b74b53ba150d69039fd.7592f06d63974473b4aaa1ea849b2940\"}",
-        "signature": "66772A1641AA8B18BD99207CE448EA00ECA6D8A4D457C1FF13AB092C22C8DECF0C0014971639A0FBA9984701A91FCCBE3056ABC1BE1541D1C198AA18AF3C45595AF6601F8B048947ADF8F48A9E3E074162F9BA3E6C0F7543D38BD54FD4C0A2C56D19716CC5353BBC73D12C3A92F78C833F4EFFDC4AB99E55C77AD2CDFA91E296"
+    [1, "MiniGame", "Simms", "info", {
+        "info": "{\"ipAddress\":\"14.240.21.213\",\"wsToken\":\"eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJnZW5kZXIiOjAsImNhblZpZXdTdGF0IjpmYWxzZSwiZGlzcGxheU5hbWUiOiJib3RydW1zdW53aW5zZXciLCJib3QiOjAsImlzTWVyY2hhbnQiOmZhbHNlLCJ2ZXJpZmllZEJhbmtBY2NvdW50IjpmYWxzZSwicGxheUV2ZW50TG9iYnkiOmZhbHNlLCJjdXN0b21lcklkIjozMzMzOTY2NzYsImFmZklkIjoic3VuLndpbiIsImJhbm5lZCI6ZmFsc2UsImJyYW5kIjoic3VuLndpbiIsImVtYWlsIjoiIiwidGltZXN0YW1wIjoxNzgwNTA5NTgxMjY0LCJsb2NrR2FtZXMiOltdLCJhbW91bnQiOjAsImxvY2tDaGF0IjpmYWxzZSwicGhvbmVWZXJpZmllZCI6dHJ1ZSwiaXBBZGRyZXNzIjoiMTQuMjQwLjIxLjIxMyIsIm11dGUiOmZhbHNlLCJhdmF0YXIiOiJodHRwczovL2ltYWdlcy5zd2luc2hvcC5uZXQvaW1hZ2VzL2F2YXRhci9hdmF0YXJfMDUucG5nIiwicGxhdGZvcm1JZCI6NCwidXNlcklkIjoiOTJmOTJlODAtZWM2Zi00NDk4LTkzMjQtMTE5NWIxZTg2NTE0IiwiZW1haWxWZXJpZmllZCI6bnVsbCwicmVnVGltZSI6MTc2NzgwMDQ0ODcxNywicGhvbmUiOiI4NDg4NjAyNzc2NyIsImRlcG9zaXQiOnRydWUsInVzZXJuYW1lIjoiU0Nfc2FuZ3p6MjAwOSJ9.EZL5SMU3Xno6BF0FuK5Ds7Jq-z2V-TH63hoqbdoMfTc\",\"locale\":\"vi\",\"userId\":\"92f92e80-ec6f-4498-9324-1195b1e86514\",\"username\":\"SC_sangzz2009\",\"timestamp\":1780509581278,\"refreshToken\":\"2eb51d64427c4693a59fc1d4bf6539c1.6fc1fe677c3d4732b009207f1495872a\"}",
+        "signature": "6B98B907B61E934AA200C1396D2104F379B3DE931F22B1FDB0051D237CCB7DB1DF5BDB03FA447A0C03090B591FDD4B9505B750EEBDABCE6C5B013F220A26AC36F03BF0A582CFAA06811F03EEE5C012259823BB64252B8B8F98CF10B3836B98872C209FC12AAA9BB045E2F835547891420A6F6FBFF757C6AFDC1C83FDF94A3253"
     }],
     [6, "MiniGame", "lobbyPlugin", { cmd: 10001 }],
-    [6, "MiniGame", "taixiuPlugin", { cmd: 1007 }] // Join room không có sid để lấy luồng ban đầu
+    [6, "MiniGame", "taixiuPlugin", { cmd: 1007 }]
 ];
 
 const heartbeatMessage = [6, "MiniGame", "taixiuPlugin", { cmd: 1005 }];
 
 // ===== CORE LOGIC =====
 
+// 🛠️ ĐÃ FIX: Gửi dữ liệu dưới dạng Chuỗi Văn Bản (Text) bình thường
 function safeSend(msg, label) {
     if (ws && ws.readyState === WebSocket.OPEN) {
         try {
-            ws.send(JSON.stringify(msg));
-            // Tắt console.log gửi ping/heartbeat để đỡ rác log
+            ws.send(JSON.stringify(msg)); // Không dùng Buffer nữa
             if (!label.includes('1005')) {
                 console.log(`[📤] Đã gửi: ${label}`);
             }
@@ -157,12 +159,12 @@ function detectMissedSessions(newSid) {
         missedSessionCount += (diff - 1);
         const missed = [];
         for (let i = lastCommittedSessionId + 1; i < newSid; i++) missed.push(i);
-        console.log(`[🚨 CẢNH BÁO MẤT PHIÊN] Nhảy từ ${lastCommittedSessionId} → ${newSid} | Lọt khe: [${missed.join(', ')}]`);
+        console.log(`[🚨 CẢNH BÁO] Nhảy từ ${lastCommittedSessionId} → ${newSid} | Lọt khe: [${missed.join(', ')}]`);
     }
 }
 
 function commitResult(sessionId, d1, d2, d3, timestamp, source) {
-    if (sessionId && committedSessions.has(sessionId)) return; // Bỏ qua trùng lặp
+    if (sessionId && committedSessions.has(sessionId)) return;
 
     const total = d1 + d2 + d3;
     const result = (total >= 11) ? "Tài" : "Xỉu";
@@ -174,7 +176,7 @@ function commitResult(sessionId, d1, d2, d3, timestamp, source) {
         lastCommittedSessionId = sessionId;
         seenSessions.add(sessionId);
         committedSessions.add(sessionId);
-        if (committedSessions.size > MAX_HISTORY) committedSessions.delete([...committedSessions][0]);
+        if (committedSessions.size > 500) committedSessions.delete([...committedSessions][0]);
     }
 
     apiResponseData = {
@@ -187,7 +189,7 @@ function commitResult(sessionId, d1, d2, d3, timestamp, source) {
 
     const entry = { session: sessionId, dice: [d1, d2, d3], total, result, timestamp, source };
     patternHistory.push(entry);
-    if (patternHistory.length > MAX_HISTORY) patternHistory.shift();
+    if (patternHistory.length > 500) patternHistory.shift();
     saveHistoryToDB(entry);
 }
 
@@ -202,7 +204,6 @@ function handleSessionTracking(data) {
 }
 
 // ===== WEBSOCKET MANAGER =====
-
 function connectWebSocket() {
     isIntentionalClose = false;
     clearTimeout(reconnectTimeout);
@@ -229,23 +230,20 @@ function connectWebSocket() {
         lastMessageTime = Date.now();
         reconnectAttempts = 0;
         messageCount = 0;
+        lastJoinedSid = null; // Reset cờ chống spam khi kết nối lại
 
-        // Gửi chuỗi khởi tạo
         initialMessages.forEach((msg, i) => {
             setTimeout(() => safeSend(msg, `Init[${i}]`), i * 300);
         });
 
-        // Ping chuẩn
         pingInterval = setInterval(() => {
             if (ws?.readyState === WebSocket.OPEN) ws.ping();
         }, 20000);
 
-        // Heartbeat Game
         heartbeatInterval = setInterval(() => {
             safeSend(heartbeatMessage, 'Heartbeat (1005)');
         }, 6000);
 
-        // Nới Watchdog lên 25s
         watchdogInterval = setInterval(() => {
             const now = Date.now();
             if (lastMessageTime && (now - lastMessageTime > 25000)) { 
@@ -257,12 +255,29 @@ function connectWebSocket() {
         }, 5000);
     });
 
-    ws.on('message', (message) => {
+    ws.on('message', (message, isBinary) => {
         try {
             lastMessageTime = Date.now();
             messageCount++;
             
-            const rawData = message.toString();
+            let rawData;
+            // Giải mã Buffer sang Text (phòng hờ server vẫn gửi binary)
+            if (Buffer.isBuffer(message) || isBinary) {
+                rawData = message.toString('utf8');
+            } else {
+                rawData = message.toString();
+            }
+
+            // Loại bỏ các byte/ký tự lạ ở đầu gói tin
+            if (rawData && !rawData.startsWith('[') && !rawData.startsWith('{')) {
+                const firstBracketIndex = Math.max(rawData.indexOf('['), rawData.indexOf('{'));
+                if (firstBracketIndex !== -1) {
+                    rawData = rawData.substring(firstBracketIndex);
+                } else {
+                    return; 
+                }
+            }
+
             const data = JSON.parse(rawData);
 
             if (!Array.isArray(data) || typeof data[1] !== 'object' || data[1] === null) return;
@@ -272,13 +287,14 @@ function connectWebSocket() {
 
             handleSessionTracking(payload);
 
-            // Gói 1008 báo phiên mới
             if (cmd === 1008 && payload.sid) {
-                console.log(`[🎮] Server báo phiên mới: ${payload.sid}, đang xin Join...`);
-                safeSend([6, "MiniGame", "taixiuPlugin", { cmd: 1007, sid: payload.sid }], `Join Room (1007) sid=${payload.sid}`);
+                if (payload.sid !== lastJoinedSid) {
+                    console.log(`[🎮] Server báo phiên mới: ${payload.sid}, đang xin Join...`);
+                    safeSend([6, "MiniGame", "taixiuPlugin", { cmd: 1007, sid: payload.sid }], `Join Room (1007) sid=${payload.sid}`);
+                    lastJoinedSid = payload.sid;
+                }
             }
 
-            // Gói 1003 trả kết quả
             if (cmd === 1003) {
                 const { d1, d2, d3, sid } = payload;
                 if (!d1 || !d2 || !d3) return;
@@ -300,7 +316,7 @@ function connectWebSocket() {
                 }
             }
         } catch (e) {
-            // Bỏ qua lỗi parse
+            // Im lặng bỏ qua lỗi parse
         }
     });
 
@@ -342,5 +358,38 @@ function startKeepAlive() {
 app.get('/', (req, res) => res.json(apiResponseData));
 app.get('/api/ket-qua', (req, res) => res.json(apiResponseData));
 
-// ===== API LỊCH SỬ MỚI =====
-app.
+// 👉 ĐÃ SỬA API ROUTE TẠI ĐÂY 👈
+app.get('/api/taixiu/history', (req, res) => {
+    const limit = parseInt(req.query.limit) || 10;
+    res.json({
+        total: patternHistory.length,
+        limit,
+        data: patternHistory.slice(-limit),
+        latest: apiResponseData
+    });
+});
+
+app.get('/api/health', (req, res) => res.json({
+    status: 'online',
+    ws_state: ws ? ws.readyState : null,
+    uptime: process.uptime().toFixed(1),
+    messages_received: messageCount,
+    missed_sessions: missedSessionCount,
+    last_known_session: lastKnownSessionId
+}));
+
+// ===== START SERVER =====
+app.listen(PORT, '0.0.0.0', async () => {
+    console.log(`\n=== 🚀 KHỞI ĐỘNG CỖ MÁY CRAWL TÀI XỈU (GIAO THỨC TEXT CHUẨN) ===`);
+    console.log(`[Port] ${PORT}`);
+    
+    await connectMongoDB();
+    startKeepAlive();
+    connectWebSocket();
+});
+
+process.on('SIGINT', () => {
+    console.log('\n[🛑] Tắt máy...');
+    if (ws) ws.terminate();
+    process.exit(0);
+});
