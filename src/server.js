@@ -127,10 +127,20 @@ function detectMissedSessions(newSid) {
 
 // ===== COMMIT KẾT QUẢ VÀO STATE =====
 function commitResult(sessionId, d1, d2, d3, timestamp, source) {
-    // ===== FIX #1: CHỐNG COMMIT TRÙNG CÙNG 1 PHIÊN =====
-    if (sessionId && committedSessions.has(sessionId)) {
-        console.log(`[⚠️ SKIP] Phiên ${sessionId} đã được commit rồi, bỏ qua duplicate từ [${source}]`);
+    // Chỉ chống trùng tuyệt đối khi sid đến trực tiếp từ message
+    // KHÔNG block fallback source vì nhiều phiên khác nhau có thể rơi vào cùng sid cũ
+    const strictSources = ['1003-sid', 'pending-flush', 'pending-timeout'];
+    if (sessionId && committedSessions.has(sessionId) && strictSources.includes(source)) {
+        console.log(`[⚠️ SKIP] Phiên ${sessionId} đã commit, bỏ qua duplicate [${source}]`);
         return;
+    }
+    // Với fallback: chỉ skip nếu dice hoàn toàn giống nhau
+    if (sessionId && committedSessions.has(sessionId) && !strictSources.includes(source)) {
+        const last = patternHistory[patternHistory.length - 1];
+        if (last && last.session === sessionId && last.dice[0] === d1 && last.dice[1] === d2 && last.dice[2] === d3) {
+            console.log(`[⚠️ SKIP] Phiên ${sessionId} cùng dice đã commit, bỏ qua [${source}]`);
+            return;
+        }
     }
 
     const total = d1 + d2 + d3;
