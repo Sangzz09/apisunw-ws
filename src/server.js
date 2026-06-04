@@ -47,7 +47,8 @@ async function connectMongoDB() {
 async function loadHistoryFromDB() {
     if (!historyCollection) return;
     try {
-        const docs = await historyCollection.find({}).sort({ session: -1 }).limit(500).toArray();
+        // GIỚI HẠN LOAD 50 PHIÊN
+        const docs = await historyCollection.find({}).sort({ session: -1 }).limit(50).toArray();
         patternHistory = docs.reverse().map(d => ({
             session: d.session,
             dice: d.dice,
@@ -76,8 +77,9 @@ async function saveHistoryToDB(entry) {
             { upsert: true }
         );
         const count = await historyCollection.countDocuments();
-        if (count > 500) {
-            const oldest = await historyCollection.find({}).sort({ session: 1 }).limit(count - 500).toArray();
+        // GIỚI HẠN XÓA NẾU VƯỢT QUÁ 50 PHIÊN
+        if (count > 50) {
+            const oldest = await historyCollection.find({}).sort({ session: 1 }).limit(count - 50).toArray();
             const ids = oldest.map(d => d._id);
             await historyCollection.deleteMany({ _id: { $in: ids } });
         }
@@ -174,7 +176,8 @@ function commitResult(sessionId, d1, d2, d3, timestamp, source) {
         lastCommittedSessionId = sessionId;
         seenSessions.add(sessionId);
         committedSessions.add(sessionId);
-        if (committedSessions.size > 500) committedSessions.delete([...committedSessions][0]);
+        // GIỚI HẠN SET XUỐNG 50
+        if (committedSessions.size > 50) committedSessions.delete([...committedSessions][0]);
     }
 
     apiResponseData = {
@@ -187,14 +190,14 @@ function commitResult(sessionId, d1, d2, d3, timestamp, source) {
 
     const entry = { session: sessionId, dice: [d1, d2, d3], total, result, timestamp, source };
     patternHistory.push(entry);
-    if (patternHistory.length > 500) patternHistory.shift();
+    // GIỚI HẠN MẢNG XUỐNG 50
+    if (patternHistory.length > 50) patternHistory.shift();
     saveHistoryToDB(entry);
 }
 
 // 🛠️ BẢN VÁ: Join Phòng Chủ Động (Aggressive Join)
 function handleSessionTracking(data) {
     if (data && data.sid) {
-        // Xin Join ngay khi thấy ID phiên mới xuất hiện ở bất kỳ gói tin nào
         if (data.sid !== lastJoinedSid) {
             console.log(`[🎮] Phát hiện phiên mới: ${data.sid}, Lập tức xin Join...`);
             safeSend([6, "MiniGame", "taixiuPlugin", { cmd: 1007, sid: data.sid }], `Join Room (1007) sid=${data.sid}`);
@@ -238,7 +241,7 @@ function connectWebSocket() {
         lastMessageTime = Date.now();
         reconnectAttempts = 0;
         messageCount = 0;
-        lastJoinedSid = null; // Reset cờ để kích hoạt Join phòng ngay phiên đầu tiên
+        lastJoinedSid = null;
 
         initialMessages.forEach((msg, i) => {
             setTimeout(() => safeSend(msg, `Init[${i}]`), i * 300);
@@ -275,8 +278,9 @@ function connectWebSocket() {
                 rawData = message.toString();
             }
 
+            // SỬA LỖI LOGIC: Tìm đúng vị trí mảng/object đầu tiên
             if (rawData && !rawData.startsWith('[') && !rawData.startsWith('{')) {
-                const firstBracketIndex = Math.max(rawData.indexOf('['), rawData.indexOf('{'));
+                const firstBracketIndex = rawData.search(/[[{]/);
                 if (firstBracketIndex !== -1) {
                     rawData = rawData.substring(firstBracketIndex);
                 } else {
@@ -358,7 +362,8 @@ app.get('/', (req, res) => res.json(apiResponseData));
 app.get('/api/ket-qua', (req, res) => res.json(apiResponseData));
 
 app.get('/api/taixiu/history', (req, res) => {
-    const limit = parseInt(req.query.limit) || 10;
+    // SỬA GIỚI HẠN TRẢ VỀ MẶC ĐỊNH LÀ 50
+    const limit = parseInt(req.query.limit) || 50;
     res.json({
         total: patternHistory.length,
         limit,
