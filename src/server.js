@@ -13,7 +13,7 @@ const PORT = process.env.PORT || 3001;
 // ===== CONFIGURATION =====
 const MONGODB_URI = process.env.MONGODB_URI;
 
-// 🔴 1. THAY TOKEN MỚI VÀO ĐÂY (NHỚ GIỮ NGUYÊN CHỮ wss://.../websocket?token=)
+// 🔴 1. THAY TOKEN MỚI VÀO ĐÂY
 const WEBSOCKET_URL = "wss://websocket.azhkthg1.net/websocket?token=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJnZW5kZXIiOjAsImNhblZpZXdTdGF0IjpmYWxzZSwiZGlzcGxheU5hbWUiOiJib3RydW1zdW53aW5zZXciLCJib3QiOjAsImlzTWVyY2hhbnQiOmZhbHNlLCJ2ZXJpZmllZEJhbmtBY2NvdW50IjpmYWxzZSwicGxheUV2ZW50TG9iYnkiOmZhbHNlLCJjdXN0b21lcklkIjozMzMzOTY2NzYsImFmZklkIjoic3VuLndpbiIsImJhbm5lZCI6ZmFsc2UsImJyYW5kIjoic3VuLndpbiIsImVtYWlsIjoiIiwidGltZXN0YW1wIjoxNzgwNTA5NTgxMjY0LCJsb2NrR2FtZXMiOltdLCJhbW91bnQiOjAsImxvY2tDaGF0IjpmYWxzZSwicGhvbmVWZXJpZmllZCI6dHJ1ZSwiaXBBZGRyZXNzIjoiMTQuMjQwLjIxLjIxMyIsIm11dGUiOmZhbHNlLCJhdmF0YXIiOiJodHRwczovL2ltYWdlcy5zd2luc2hvcC5uZXQvaW1hZ2VzL2F2YXRhci9hdmF0YXJfMDUucG5nIiwicGxhdGZvcm1JZCI6NCwidXNlcklkIjoiOTJmOTJlODAtZWM2Zi00NDk4LTkzMjQtMTE5NWIxZTg2NTE0IiwiZW1haWxWZXJpZmllZCI6bnVsbCwicmVnVGltZSI6MTc2NzgwMDQ0ODcxNywicGhvbmUiOiI4NDg4NjAyNzc2NyIsImRlcG9zaXQiOnRydWUsInVzZXJuYW1lIjoiU0Nfc2FuZ3p6MjAwOSJ9.EZL5SMU3Xno6BF0FuK5Ds7Jq-z2V-TH63hoqbdoMfTc";
 
 const SELF_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
@@ -47,7 +47,6 @@ async function connectMongoDB() {
 async function loadHistoryFromDB() {
     if (!historyCollection) return;
     try {
-        // GIỚI HẠN LOAD 50 PHIÊN
         const docs = await historyCollection.find({}).sort({ session: -1 }).limit(50).toArray();
         patternHistory = docs.reverse().map(d => ({
             session: d.session,
@@ -77,7 +76,6 @@ async function saveHistoryToDB(entry) {
             { upsert: true }
         );
         const count = await historyCollection.countDocuments();
-        // GIỚI HẠN XÓA NẾU VƯỢT QUÁ 50 PHIÊN
         if (count > 50) {
             const oldest = await historyCollection.find({}).sort({ session: 1 }).limit(count - 50).toArray();
             const ids = oldest.map(d => d._id);
@@ -152,31 +150,18 @@ function safeSend(msg, label) {
     }
 }
 
-function detectMissedSessions(newSid) {
-    if (!lastCommittedSessionId || !newSid) return;
-    const diff = newSid - lastCommittedSessionId;
-    if (diff > 1) {
-        missedSessionCount += (diff - 1);
-        const missed = [];
-        for (let i = lastCommittedSessionId + 1; i < newSid; i++) missed.push(i);
-        console.log(`[🚨 CẢNH BÁO] Nhảy từ ${lastCommittedSessionId} → ${newSid} | Lọt khe: [${missed.join(', ')}]`);
-    }
-}
-
 function commitResult(sessionId, d1, d2, d3, timestamp, source) {
+    // Bỏ qua nếu phiên này đã được lưu
     if (sessionId && committedSessions.has(sessionId)) return;
 
     const total = d1 + d2 + d3;
     const result = (total >= 11) ? "Tài" : "Xỉu";
-
-    detectMissedSessions(sessionId);
 
     if (sessionId) {
         lastKnownSessionId = sessionId;
         lastCommittedSessionId = sessionId;
         seenSessions.add(sessionId);
         committedSessions.add(sessionId);
-        // GIỚI HẠN SET XUỐNG 50
         if (committedSessions.size > 50) committedSessions.delete([...committedSessions][0]);
     }
 
@@ -190,12 +175,36 @@ function commitResult(sessionId, d1, d2, d3, timestamp, source) {
 
     const entry = { session: sessionId, dice: [d1, d2, d3], total, result, timestamp, source };
     patternHistory.push(entry);
-    // GIỚI HẠN MẢNG XUỐNG 50
     if (patternHistory.length > 50) patternHistory.shift();
     saveHistoryToDB(entry);
 }
 
-// 🛠️ BẢN VÁ: Join Phòng Chủ Động (Aggressive Join)
+// 🛡️ VŨ KHÍ MỚI: Deep Scan - Quét mọi ngóc ngách để tìm kết quả lọt khe
+function extractResultsFromPayload(obj) {
+    if (!obj || typeof obj !== 'object') return;
+
+    // Chuẩn 1: Object chứa đủ d1, d2, d3, sid (Thường gặp)
+    if (obj.sid && obj.d1 !== undefined && obj.d2 !== undefined && obj.d3 !== undefined) {
+        if (!committedSessions.has(obj.sid)) {
+            commitResult(obj.sid, obj.d1, obj.d2, obj.d3, new Date().toISOString(), 'auto-recovery');
+        }
+    }
+
+    // Chuẩn 2: Mảng dices (Ví dụ: {sid: 1234, dices: [1, 2, 3]})
+    if (obj.sid && obj.dices && Array.isArray(obj.dices) && obj.dices.length === 3) {
+        if (!committedSessions.has(obj.sid)) {
+            commitResult(obj.sid, obj.dices[0], obj.dices[1], obj.dices[2], new Date().toISOString(), 'auto-recovery-history');
+        }
+    }
+
+    // Đệ quy lục lọi vào mảng/object con sâu hơn
+    for (let key in obj) {
+        if (typeof obj[key] === 'object') {
+            extractResultsFromPayload(obj[key]);
+        }
+    }
+}
+
 function handleSessionTracking(data) {
     if (data && data.sid) {
         if (data.sid !== lastJoinedSid) {
@@ -209,7 +218,7 @@ function handleSessionTracking(data) {
             lastKnownSessionId = data.sid;
             seenSessions.add(data.sid);
             sessionCounter++;
-            console.log(`[🔄 UPDATE] Chuyển sang phiên: ${data.sid}`);
+            console.log(`[🔄 UPDATE] Đang theo dõi phiên: ${data.sid}`);
         }
     }
 }
@@ -278,7 +287,6 @@ function connectWebSocket() {
                 rawData = message.toString();
             }
 
-            // SỬA LỖI LOGIC: Tìm đúng vị trí mảng/object đầu tiên
             if (rawData && !rawData.startsWith('[') && !rawData.startsWith('{')) {
                 const firstBracketIndex = rawData.search(/[[{]/);
                 if (firstBracketIndex !== -1) {
@@ -289,35 +297,15 @@ function connectWebSocket() {
             }
 
             const data = JSON.parse(rawData);
+            
+            // 🛡️ KÍCH HOẠT VŨ KHÍ: Quét trọn vẹn toàn bộ cục data để nhặt kết quả lọt khe
+            extractResultsFromPayload(data);
 
             if (!Array.isArray(data) || typeof data[1] !== 'object' || data[1] === null) return;
             
             const payload = data[1];
-            const cmd = payload.cmd;
-
             handleSessionTracking(payload);
 
-            // Bắt kết quả
-            if (cmd === 1003) {
-                const { d1, d2, d3, sid } = payload;
-                if (!d1 || !d2 || !d3) return;
-                
-                const resolvedSid = sid || currentSessionId || lastKnownSessionId;
-                const receiveTime = new Date().toISOString();
-                
-                if (resolvedSid) {
-                    commitResult(resolvedSid, d1, d2, d3, receiveTime, '1003');
-                } else {
-                    pendingDiceResult = { d1, d2, d3, timestamp: receiveTime };
-                    clearTimeout(pendingDiceTimer);
-                    pendingDiceTimer = setTimeout(() => {
-                        if (pendingDiceResult) {
-                            commitResult("UNKNOWN", d1, d2, d3, receiveTime, 'timeout');
-                            pendingDiceResult = null;
-                        }
-                    }, 3000);
-                }
-            }
         } catch (e) {
             // Im lặng bỏ qua lỗi parse
         }
@@ -344,7 +332,8 @@ function cleanupAndReconnect() {
 
 function scheduleReconnect() {
     clearTimeout(reconnectTimeout);
-    const delay = reconnectAttempts < 5 ? 1000 : 3000;
+    // 🚀 BẢN VÁ: Kết nối lại siêu tốc (chỉ 100ms) để không bỏ lỡ nhịp nào
+    const delay = reconnectAttempts < 5 ? 100 : 3000;
     console.log(`[⏳] Reconnect sau ${delay}ms...`);
     reconnectTimeout = setTimeout(connectWebSocket, delay);
 }
@@ -362,7 +351,6 @@ app.get('/', (req, res) => res.json(apiResponseData));
 app.get('/api/ket-qua', (req, res) => res.json(apiResponseData));
 
 app.get('/api/taixiu/history', (req, res) => {
-    // SỬA GIỚI HẠN TRẢ VỀ MẶC ĐỊNH LÀ 50
     const limit = parseInt(req.query.limit) || 50;
     res.json({
         total: patternHistory.length,
@@ -377,13 +365,12 @@ app.get('/api/health', (req, res) => res.json({
     ws_state: ws ? ws.readyState : null,
     uptime: process.uptime().toFixed(1),
     messages_received: messageCount,
-    missed_sessions: missedSessionCount,
     last_known_session: lastKnownSessionId
 }));
 
 // ===== START SERVER =====
 app.listen(PORT, '0.0.0.0', async () => {
-    console.log(`\n=== 🚀 KHỞI ĐỘNG CỖ MÁY CRAWL TÀI XỈU (BẢN TỐI ƯU CHỐNG LỌT KHE) ===`);
+    console.log(`\n=== 🚀 KHỞI ĐỘNG CỖ MÁY CRAWL TÀI XỈU (BẢN TỐI THƯỢNG - 0 LỌT KHE) ===`);
     console.log(`[Port] ${PORT}`);
     
     await connectMongoDB();
