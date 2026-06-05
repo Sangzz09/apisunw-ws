@@ -13,8 +13,11 @@ const PORT = process.env.PORT || 3001;
 // ===== CONFIGURATION =====
 const MONGODB_URI = process.env.MONGODB_URI;
 
-// 🔴 1. THAY TOKEN MỚI VÀO ĐÂY
-const WEBSOCKET_URL = "wss://websocket.azhkthg1.net/websocket?token=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJnZW5kZXIiOjAsImNhblZpZXdTdGF0IjpmYWxzZSwiZGlzcGxheU5hbWUiOiJib3RydW1zdW53aW5zZXciLCJib3QiOjAsImlzTWVyY2hhbnQiOmZhbHNlLCJ2ZXJpZmllZEJhbmtBY2NvdW50IjpmYWxzZSwicGxheUV2ZW50TG9iYnkiOmZhbHNlLCJjdXN0b21lcklkIjozMzMzOTY2NzYsImFmZklkIjoic3VuLndpbiIsImJhbm5lZCI6ZmFsc2UsImJyYW5kIjoic3VuLndpbiIsImVtYWlsIjoiIiwidGltZXN0YW1wIjoxNzgwNjIxNjY5MjcyLCJsb2NrR2FtZXMiOltdLCJhbW91bnQiOjAsImxvY2tDaGF0IjpmYWxzZSwicGhvbmVWZXJpZmllZCI6dHJ1ZSwiaXBBZGRyZXNzIjoiMTQuMjQwLjIxLjIxMyIsIm11dGUiOmZhbHNlLCJhdmF0YXIiOiJodHRwczovL2ltYWdlcy5zd2luc2hvcC5uZXQvaW1hZ2VzL2F2YXRhci9hdmF0YXJfMDUucG5nIiwicGxhdGZvcm1JZCI6NCwidXNlcklkIjoiOTJmOTJlODAtZWM2Zi00NDk4LTkzMjQtMTE5NWIxZTg2NTE0IiwiZW1haWxWZXJpZmllZCI6bnVsbCwicmVnVGltZSI6MTc2NzgwMDQ0ODcxNywicGhvbmUiOiI4NDg4NjAyNzc2NyIsImRlcG9zaXQiOnRydWUsInVzZXJuYW1lIjoiU0Nfc2FuZ3p6MjAwOSJ9.yCIu9jKz61CNxe45XZ9N6WSlcO-V2vvrZ6hxhLrT5dM";
+// Token sẽ được tự động cập nhật bởi autoRefreshToken()
+// Có thể override bằng env WS_TOKEN nếu muốn gán thủ công
+let WEBSOCKET_URL = process.env.WS_TOKEN
+    ? `wss://websocket.azhkthg1.net/websocket?token=${process.env.WS_TOKEN}`
+    : "wss://websocket.azhkthg1.net/websocket?token=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJnZW5kZXIiOjAsImNhblZpZXdTdGF0IjpmYWxzZSwiZGlzcGxheU5hbWUiOiJzYW5nZGVwemFpMDlubyIsImJvdCI6MCwiaXNNZXJjaGFudCI6ZmFsc2UsInZlcmlmaWVkQmFua0FjY291bnQiOmZhbHNlLCJwbGF5RXZlbnRMb2JieSI6ZmFsc2UsImN1c3RvbWVySWQiOjIyMTY0MDY3MiwiYWZmSWQiOiJTdW53aW4iLCJiYW5uZWQiOmZhbHNlLCJicmFuZCI6InN1bi53aW4iLCJlbWFpbCI6IiIsInRpbWVzdGFtcCI6MTc4MDY0ODQ4MzI2MiwibG9ja0dhbWVzIjpbXSwiYW1vdW50IjowLCJsb2NrQ2hhdCI6dHJ1ZSwicGhvbmVWZXJpZmllZCI6dHJ1ZSwiaXBBZGRyZXNzIjoiMTQuMjQwLjIxLjIxMyIsIm11dGUiOnRydWUsImF2YXRhciI6Imh0dHBzOi8vaW1hZ2VzLnN3aW5zaG9wLm5ldC9pbWFnZXMvYXZhdGFyL2F2YXRhcl8xNS5wbmciLCJwbGF0Zm9ybUlkIjo0LCJ1c2VySWQiOiI3ODRmNGU0Mi1iZWExLTRiZTUtYjgwNS03MmJlZjY5N2UwMTIiLCJlbWFpbFZlcmlmaWVkIjpudWxsLCJyZWdUaW1lIjoxNzQyMjMyMzQ1MTkxLCJwaG9uZSI6Ijg0ODg2MDI3NzY3IiwiZGVwb3NpdCI6dHJ1ZSwidXNlcm5hbWUiOiJTQ19tc2FuZ3p6MDkifQ.BKEp2lTltayLlD39-_wtYhQSNvBmOOExJ7uEtv7hxac";
 
 const SELF_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
 
@@ -124,11 +127,11 @@ const WS_HEADERS = {
     "Origin": "https://play.sun.win"
 };
 
-// 🔴 2. THAY PHẦN INFO VÀ SIGNATURE MỚI VÀO ĐÂY
-const initialMessages = [
+// 🔴 2. THAY PHẦN INFO VÀ SIGNATURE MỚI VÀO ĐÂY (tự động cập nhật khi refresh token)
+let initialMessages = [
     [1, "MiniGame", "Simms", "info", {
-        "info": "{\"ipAddress\":\"14.240.21.213\",\"wsToken\":\"eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJnZW5kZXIiOjAsImNhblZpZXdTdGF0IjpmYWxzZSwiZGlzcGxheU5hbWUiOiJib3RydW1zdW53aW5zZXciLCJib3QiOjAsImlzTWVyY2hhbnQiOmZhbHNlLCJ2ZXJpZmllZEJhbmtBY2NvdW50IjpmYWxzZSwicGxheUV2ZW50TG9iYnkiOmZhbHNlLCJjdXN0b21lcklkIjozMzMzOTY2NzYsImFmZklkIjoic3VuLndpbiIsImJhbm5lZCI6ZmFsc2UsImJyYW5kIjoic3VuLndpbiIsImVtYWlsIjoiIiwidGltZXN0YW1wIjoxNzgwNTA5NTgxMjY0LCJsb2NrR2FtZXMiOltdLCJhbW91bnQiOjAsImxvY2tDaGF0IjpmYWxzZSwicGhvbmVWZXJpZmllZCI6dHJ1ZSwiaXBBZGRyZXNzIjoiMTQuMjQwLjIxLjIxMyIsIm11dGUiOmZhbHNlLCJhdmF0YXIiOiJodHRwczovL2ltYWdlcy5zd2luc2hvcC5uZXQvaW1hZ2VzL2F2YXRhci9hdmF0YXJfMDUucG5nIiwicGxhdGZvcm1JZCI6NCwidXNlcklkIjoiOTJmOTJlODAtZWM2Zi00NDk4LTkzMjQtMTE5NWIxZTg2NTE0IiwiZW1haWxWZXJpZmllZCI6bnVsbCwicmVnVGltZSI6MTc2NzgwMDQ0ODcxNywicGhvbmUiOiI4NDg4NjAyNzc2NyIsImRlcG9zaXQiOnRydWUsInVzZXJuYW1lIjoiU0Nfc2FuZ3p6MjAwOSJ9.EZL5SMU3Xno6BF0FuK5Ds7Jq-z2V-TH63hoqbdoMfTc\",\"locale\":\"vi\",\"userId\":\"92f92e80-ec6f-4498-9324-1195b1e86514\",\"username\":\"SC_sangzz2009\",\"timestamp\":1780509581278,\"refreshToken\":\"2eb51d64427c4693a59fc1d4bf6539c1.6fc1fe677c3d4732b009207f1495872a\"}",
-        "signature": "6B98B907B61E934AA200C1396D2104F379B3DE931F22B1FDB0051D237CCB7DB1DF5BDB03FA447A0C03090B591FDD4B9505B750EEBDABCE6C5B013F220A26AC36F03BF0A582CFAA06811F03EEE5C012259823BB64252B8B8F98CF10B3836B98872C209FC12AAA9BB045E2F835547891420A6F6FBFF757C6AFDC1C83FDF94A3253"
+        "info": "{\"ipAddress\":\"14.240.21.213\",\"wsToken\":\"eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJnZW5kZXIiOjAsImNhblZpZXdTdGF0IjpmYWxzZSwiZGlzcGxheU5hbWUiOiJzYW5nZGVwemFpMDlubyIsImJvdCI6MCwiaXNNZXJjaGFudCI6ZmFsc2UsInZlcmlmaWVkQmFua0FjY291bnQiOmZhbHNlLCJwbGF5RXZlbnRMb2JieSI6ZmFsc2UsImN1c3RvbWVySWQiOjIyMTY0MDY3MiwiYWZmSWQiOiJTdW53aW4iLCJiYW5uZWQiOmZhbHNlLCJicmFuZCI6InN1bi53aW4iLCJlbWFpbCI6IiIsInRpbWVzdGFtcCI6MTc4MDY0ODQ4MzI2MiwibG9ja0dhbWVzIjpbXSwiYW1vdW50IjowLCJsb2NrQ2hhdCI6dHJ1ZSwicGhvbmVWZXJpZmllZCI6dHJ1ZSwiaXBBZGRyZXNzIjoiMTQuMjQwLjIxLjIxMyIsIm11dGUiOnRydWUsImF2YXRhciI6Imh0dHBzOi8vaW1hZ2VzLnN3aW5zaG9wLm5ldC9pbWFnZXMvYXZhdGFyL2F2YXRhcl8xNS5wbmciLCJwbGF0Zm9ybUlkIjo0LCJ1c2VySWQiOiI3ODRmNGU0Mi1iZWExLTRiZTUtYjgwNS03MmJlZjY5N2UwMTIiLCJlbWFpbFZlcmlmaWVkIjpudWxsLCJyZWdUaW1lIjoxNzQyMjMyMzQ1MTkxLCJwaG9uZSI6Ijg0ODg2MDI3NzY3IiwiZGVwb3NpdCI6dHJ1ZSwidXNlcm5hbWUiOiJTQ19tc2FuZ3p6MDkifQ.BKEp2lTltayLlD39-_wtYhQSNvBmOOExJ7uEtv7hxac\",\"locale\":\"vi\",\"userId\":\"784f4e42-bea1-4be5-b805-72bef697e012\",\"username\":\"SC_msangzz09\",\"timestamp\":1780648483262,\"refreshToken\":\"\"}",
+        "signature": ""
     }],
     [6, "MiniGame", "lobbyPlugin", { cmd: 10001 }]
 ];
@@ -223,8 +226,138 @@ function handleSessionTracking(data) {
     }
 }
 
+// ===== AUTO REFRESH TOKEN =====
+// Trạng thái refresh
+let currentRefreshToken = null;  // Sẽ được đọc từ initialMessages khi khởi động
+let tokenRefreshFailCount = 0;
+let isRefreshing = false;
+
+// Đọc refreshToken hiện tại từ initialMessages
+function getCurrentRefreshToken() {
+    try {
+        const info = JSON.parse(initialMessages[0][4].info);
+        return info.refreshToken || null;
+    } catch (e) { return null; }
+}
+
+// Đọc các thông tin nhận dạng từ initialMessages (userId, username, ipAddress...)
+function getCurrentInfoObj() {
+    try {
+        return JSON.parse(initialMessages[0][4].info);
+    } catch (e) { return null; }
+}
+
+async function autoRefreshToken() {
+    if (isRefreshing) {
+        console.log('[⏳ Token] Đang refresh, bỏ qua lần gọi trùng...');
+        return false;
+    }
+    isRefreshing = true;
+
+    const refreshToken = getCurrentRefreshToken();
+    if (!refreshToken) {
+        console.warn('[⚠️ Token] Không tìm thấy refreshToken trong config, bỏ qua.');
+        isRefreshing = false;
+        return false;
+    }
+
+    console.log('[🔑 Token] Đang tự động lấy WS Token mới qua refreshToken...');
+
+    // Các endpoint API thử lần lượt
+    const endpoints = [
+        'https://api.sunwin.qa/api/auth/token',
+        'https://api2.sunwin.qa/api/auth/token',
+        'https://api3.sunwin.qa/api/auth/token',
+        'https://web.sunwin.qa/api/auth/token',
+        'https://play.sun.win/api/auth/token',
+    ];
+
+    for (const url of endpoints) {
+        try {
+            const controller = new AbortController();
+            const tid = setTimeout(() => controller.abort(), 12000);
+
+            const infoObj = getCurrentInfoObj();
+
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'User-Agent': WS_HEADERS['User-Agent'],
+                    'Origin': 'https://play.sun.win',
+                    'Referer': 'https://play.sun.win/',
+                },
+                body: JSON.stringify({
+                    refreshToken,
+                    userId: infoObj?.userId,
+                    platform: 4,
+                }),
+                signal: controller.signal,
+            });
+
+            clearTimeout(tid);
+
+            if (!response.ok) {
+                console.warn(`[⚠️ Token] ${url} → HTTP ${response.status}`);
+                continue;
+            }
+
+            const json = await response.json();
+            const tokenData = json?.data?.data || json?.data || json;
+
+            if (!tokenData?.wsToken) {
+                console.warn(`[⚠️ Token] ${url} → Không có wsToken. Body:`, JSON.stringify(json).slice(0, 150));
+                continue;
+            }
+
+            const newToken = tokenData.wsToken;
+            const oldToken = WEBSOCKET_URL.split('token=')[1] || '';
+
+            // Cập nhật WEBSOCKET_URL
+            WEBSOCKET_URL = `wss://websocket.azhkthg1.net/websocket?token=${newToken}`;
+
+            // Cập nhật initialMessages[0] với token và refreshToken mới
+            try {
+                const info = getCurrentInfoObj();
+                info.wsToken = newToken;
+                if (tokenData.refreshToken) info.refreshToken = tokenData.refreshToken;
+                if (tokenData.timestamp)    info.timestamp    = tokenData.timestamp;
+                initialMessages[0][4].info = JSON.stringify(info);
+            } catch (e) {
+                console.warn('[⚠️ Token] Lỗi cập nhật info:', e.message);
+            }
+
+            if (tokenData.signature) {
+                initialMessages[0][4].signature = tokenData.signature;
+            }
+
+            tokenRefreshFailCount = 0;
+            isRefreshing = false;
+
+            if (newToken === oldToken) {
+                console.log('[ℹ️ Token] Token chưa đổi, vẫn còn hiệu lực.');
+            } else {
+                console.log(`[✅ Token] Lấy token mới thành công! ...${newToken.slice(-20)}`);
+            }
+            return true;
+
+        } catch (err) {
+            const reason = err.name === 'AbortError' ? 'timeout 12s' : err.message;
+            console.warn(`[⚠️ Token] ${url} → ${reason}`);
+        }
+    }
+
+    tokenRefreshFailCount++;
+    isRefreshing = false;
+    console.error(`[❌ Token] Tất cả endpoint thất bại (lần ${tokenRefreshFailCount}). Dùng token cũ.`);
+    if (tokenRefreshFailCount >= 3) {
+        console.error('[🚨 Token] Token có thể đã chết! Hãy cập nhật thủ công token mới vào code hoặc env WS_TOKEN.');
+    }
+    return false;
+}
+
 // ===== WEBSOCKET MANAGER =====
-function connectWebSocket() {
+async function connectWebSocket() {
     isIntentionalClose = false;
     clearTimeout(reconnectTimeout);
     
@@ -234,6 +367,12 @@ function connectWebSocket() {
     }
 
     reconnectAttempts++;
+
+    // Tự động refresh token: lần đầu tiên hoặc mỗi 3 lần reconnect liên tiếp
+    if (reconnectAttempts === 1 || reconnectAttempts % 3 === 0) {
+        await autoRefreshToken();
+    }
+
     console.log(`[🔌] Đang kết nối WS (Lần ${reconnectAttempts})...`);
 
     try {
@@ -266,13 +405,14 @@ function connectWebSocket() {
 
         watchdogInterval = setInterval(() => {
             const now = Date.now();
-            if (lastMessageTime && (now - lastMessageTime > 25000)) { 
-                console.log(`[🚨 WATCHDOG] Bị kẹt dữ liệu (25s im lặng). Force Reconnect!`);
+            const silentSecs = lastMessageTime ? Math.floor((now - lastMessageTime) / 1000) : 0;
+            if (lastMessageTime && silentSecs > 90) {
+                console.log(`[🚨 WATCHDOG] Im lặng ${silentSecs}s (${messageCount} msg). Có thể token chết → Reconnect!`);
                 isIntentionalClose = true;
                 ws.terminate();
                 scheduleReconnect();
             }
-        }, 5000);
+        }, 10000);
     });
 
     ws.on('message', (message, isBinary) => {
@@ -332,9 +472,13 @@ function cleanupAndReconnect() {
 
 function scheduleReconnect() {
     clearTimeout(reconnectTimeout);
-    // 🚀 BẢN VÁ: Kết nối lại siêu tốc (chỉ 100ms) để không bỏ lỡ nhịp nào
-    const delay = reconnectAttempts < 5 ? 100 : 3000;
-    console.log(`[⏳] Reconnect sau ${delay}ms...`);
+    // Tăng dần delay để tránh spam khi token chết: 2s → 5s → 10s → 15s
+    let delay;
+    if (reconnectAttempts <= 1)      delay = 2000;
+    else if (reconnectAttempts <= 3) delay = 5000;
+    else if (reconnectAttempts <= 6) delay = 10000;
+    else                             delay = 15000;
+    console.log(`[⏳] Reconnect sau ${delay / 1000}s... (lần ${reconnectAttempts})`);
     reconnectTimeout = setTimeout(connectWebSocket, delay);
 }
 
@@ -362,11 +506,21 @@ app.get('/api/taixiu/history', (req, res) => {
 
 app.get('/api/health', (req, res) => res.json({
     status: 'online',
-    ws_state: ws ? ws.readyState : null,
-    uptime: process.uptime().toFixed(1),
+    ws_state: ws ? ['CONNECTING','OPEN','CLOSING','CLOSED'][ws.readyState] : 'null',
+    uptime_secs: Math.floor(process.uptime()),
     messages_received: messageCount,
-    last_known_session: lastKnownSessionId
+    reconnect_attempts: reconnectAttempts,
+    token_refresh_fails: tokenRefreshFailCount,
+    last_known_session: lastKnownSessionId,
+    silent_secs: lastMessageTime ? Math.floor((Date.now() - lastMessageTime) / 1000) : null,
 }));
+
+// Gọi URL này để force refresh token ngay lập tức (không cần restart)
+app.get('/api/refresh-token', async (req, res) => {
+    console.log('[🔑] Force refresh token theo yêu cầu HTTP...');
+    const ok = await autoRefreshToken();
+    res.json({ success: ok, message: ok ? '✅ Token mới đã cập nhật!' : '❌ Refresh thất bại, xem log Render.' });
+});
 
 // ===== START SERVER =====
 app.listen(PORT, '0.0.0.0', async () => {
