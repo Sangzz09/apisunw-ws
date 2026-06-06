@@ -1,7 +1,6 @@
 const WebSocket = require('ws');
 const express = require('express');
 const cors = require('cors');
-const os = require('os');
 const https = require('https');
 const http = require('http');
 const { MongoClient } = require('mongodb');
@@ -13,8 +12,6 @@ const PORT = process.env.PORT || 3001;
 // ===== CONFIGURATION =====
 const MONGODB_URI = process.env.MONGODB_URI;
 
-// Token sẽ được tự động cập nhật bởi autoRefreshToken()
-// Có thể override bằng env WS_TOKEN nếu muốn gán thủ công
 let WEBSOCKET_URL = process.env.WS_TOKEN
     ? `wss://websocket.azhkthg1.net/websocket?token=${process.env.WS_TOKEN}`
     : "wss://websocket.azhkthg1.net/websocket?token=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJnZW5kZXIiOjAsImNhblZpZXdTdGF0IjpmYWxzZSwiZGlzcGxheU5hbWUiOiJzYW5nZGVwemFpMDlubyIsImJvdCI6MCwiaXNNZXJjaGFudCI6ZmFsc2UsInZlcmlmaWVkQmFua0FjY291bnQiOmZhbHNlLCJwbGF5RXZlbnRMb2JieSI6ZmFsc2UsImN1c3RvbWVySWQiOjIyMTY0MDY3MiwiYWZmSWQiOiJTdW53aW4iLCJiYW5uZWQiOmZhbHNlLCJicmFuZCI6InN1bi53aW4iLCJlbWFpbCI6IiIsInRpbWVzdGFtcCI6MTc4MDczODkzNjM2NiwibG9ja0dhbWVzIjpbXSwiYW1vdW50IjowLCJsb2NrQ2hhdCI6dHJ1ZSwicGhvbmVWZXJpZmllZCI6dHJ1ZSwiaXBBZGRyZXNzIjoiMTQuMjQwLjIxLjE1OSIsIm11dGUiOnRydWUsImF2YXRhciI6Imh0dHBzOi8vaW1hZ2VzLnN3aW5zaG9wLm5ldC9pbWFnZXMvYXZhdGFyL2F2YXRhcl8xNS5wbmciLCJwbGF0Zm9ybUlkIjo0LCJ1c2VySWQiOiI3ODRmNGU0Mi1iZWExLTRiZTUtYjgwNS03MmJlZjY5N2UwMTIiLCJlbWFpbFZlcmlmaWVkIjpudWxsLCJyZWdUaW1lIjoxNzQyMjMyMzQ1MTkxLCJwaG9uZSI6Ijg0ODg2MDI3NzY3IiwiZGVwb3NpdCI6dHJ1ZSwidXNlcm5hbWUiOiJTQ19tc2FuZ3p6MDkifQ.yG8SC7MeqNgnhmjUQGsRxPvkSEX_797yzuwHAUga8iE";
@@ -92,7 +89,8 @@ async function saveHistoryToDB(entry) {
 // ===== STATE MANAGEMENT =====
 let apiResponseData = {
     "Phien": null, "Xuc_xac_1": null, "Xuc_xac_2": null, "Xuc_xac_3": null,
-    "Tong": null, "Ket_qua": "", "id": "@sewdangcap", "server_time": new Date().toISOString(), "update_count": 0
+    "Tong": null, "Ket_qua": "", "id": "@sewdangcap",
+    "server_time": new Date().toISOString(), "update_count": 0
 };
 
 let ws = null;
@@ -101,12 +99,9 @@ let lastKnownSessionId = null;
 let lastCommittedSessionId = null;
 let lastJoinedSid = null;
 let sessionCounter = 0;
-let missedSessionCount = 0;
 
 const seenSessions = new Set();
 const committedSessions = new Set();
-let pendingDiceResult = null;
-let pendingDiceTimer = null;
 
 // WS Connection States
 let wsConnectedAt = null;
@@ -127,7 +122,6 @@ const WS_HEADERS = {
     "Origin": "https://play.sun.win"
 };
 
-// 🔴 2. THAY PHẦN INFO VÀ SIGNATURE MỚI VÀO ĐÂY (tự động cập nhật khi refresh token)
 let initialMessages = [
     [1, "MiniGame", "Simms", "info", {
         "info": "{\"ipAddress\":\"14.240.21.213\",\"wsToken\":\"eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJnZW5kZXIiOjAsImNhblZpZXdTdGF0IjpmYWxzZSwiZGlzcGxheU5hbWUiOiJzYW5nZGVwemFpMDlubyIsImJvdCI6MCwiaXNNZXJjaGFudCI6ZmFsc2UsInZlcmlmaWVkQmFua0FjY291bnQiOmZhbHNlLCJwbGF5RXZlbnRMb2JieSI6ZmFsc2UsImN1c3RvbWVySWQiOjIyMTY0MDY3MiwiYWZmSWQiOiJTdW53aW4iLCJiYW5uZWQiOmZhbHNlLCJicmFuZCI6InN1bi53aW4iLCJlbWFpbCI6IiIsInRpbWVzdGFtcCI6MTc4MDY0ODQ4MzI2MiwibG9ja0dhbWVzIjpbXSwiYW1vdW50IjowLCJsb2NrQ2hhdCI6dHJ1ZSwicGhvbmVWZXJpZmllZCI6dHJ1ZSwiaXBBZGRyZXNzIjoiMTQuMjQwLjIxLjIxMyIsIm11dGUiOnRydWUsImF2YXRhciI6Imh0dHBzOi8vaW1hZ2VzLnN3aW5zaG9wLm5ldC9pbWFnZXMvYXZhdGFyL2F2YXRhcl8xNS5wbmciLCJwbGF0Zm9ybUlkIjo0LCJ1c2VySWQiOiI3ODRmNGU0Mi1iZWExLTRiZTUtYjgwNS03MmJlZjY5N2UwMTIiLCJlbWFpbFZlcmlmaWVkIjpudWxsLCJyZWdUaW1lIjoxNzQyMjMyMzQ1MTkxLCJwaG9uZSI6Ijg0ODg2MDI3NzY3IiwiZGVwb3NpdCI6dHJ1ZSwidXNlcm5hbWUiOiJTQ19tc2FuZ3p6MDkifQ.BKEp2lTltayLlD39-_wtYhQSNvBmOOExJ7uEtv7hxac\",\"locale\":\"vi\",\"userId\":\"784f4e42-bea1-4be5-b805-72bef697e012\",\"username\":\"SC_msangzz09\",\"timestamp\":1780648483262,\"refreshToken\":\"\"}",
@@ -138,12 +132,23 @@ let initialMessages = [
 
 const heartbeatMessage = [6, "MiniGame", "taixiuPlugin", { cmd: 1005 }];
 
-// ===== CORE LOGIC =====
+// Inject refreshToken từ env nếu có
+if (process.env.REFRESH_TOKEN) {
+    try {
+        const info = JSON.parse(initialMessages[0][4].info);
+        info.refreshToken = process.env.REFRESH_TOKEN;
+        initialMessages[0][4].info = JSON.stringify(info);
+        console.log('[✅] Đã load REFRESH_TOKEN từ env.');
+    } catch (e) {
+        console.warn('[⚠️] Lỗi inject REFRESH_TOKEN từ env:', e.message);
+    }
+}
 
+// ===== CORE LOGIC =====
 function safeSend(msg, label) {
     if (ws && ws.readyState === WebSocket.OPEN) {
         try {
-            ws.send(JSON.stringify(msg)); 
+            ws.send(JSON.stringify(msg));
             if (!label.includes('1005')) {
                 console.log(`[📤] Đã gửi: ${label}`);
             }
@@ -154,7 +159,6 @@ function safeSend(msg, label) {
 }
 
 function commitResult(sessionId, d1, d2, d3, timestamp, source) {
-    // Bỏ qua nếu phiên này đã được lưu
     if (sessionId && committedSessions.has(sessionId)) return;
 
     const total = d1 + d2 + d3;
@@ -170,7 +174,8 @@ function commitResult(sessionId, d1, d2, d3, timestamp, source) {
 
     apiResponseData = {
         "Phien": sessionId, "Xuc_xac_1": d1, "Xuc_xac_2": d2, "Xuc_xac_3": d3,
-        "Tong": total, "Ket_qua": result, "id": "@sewdangcap", "server_time": timestamp,
+        "Tong": total, "Ket_qua": result, "id": "@sewdangcap",
+        "server_time": timestamp,
         "update_count": (apiResponseData.update_count || 0) + 1
     };
 
@@ -182,25 +187,21 @@ function commitResult(sessionId, d1, d2, d3, timestamp, source) {
     saveHistoryToDB(entry);
 }
 
-// 🛡️ VŨ KHÍ MỚI: Deep Scan - Quét mọi ngóc ngách để tìm kết quả lọt khe
 function extractResultsFromPayload(obj) {
     if (!obj || typeof obj !== 'object') return;
 
-    // Chuẩn 1: Object chứa đủ d1, d2, d3, sid (Thường gặp)
     if (obj.sid && obj.d1 !== undefined && obj.d2 !== undefined && obj.d3 !== undefined) {
         if (!committedSessions.has(obj.sid)) {
             commitResult(obj.sid, obj.d1, obj.d2, obj.d3, new Date().toISOString(), 'auto-recovery');
         }
     }
 
-    // Chuẩn 2: Mảng dices (Ví dụ: {sid: 1234, dices: [1, 2, 3]})
     if (obj.sid && obj.dices && Array.isArray(obj.dices) && obj.dices.length === 3) {
         if (!committedSessions.has(obj.sid)) {
             commitResult(obj.sid, obj.dices[0], obj.dices[1], obj.dices[2], new Date().toISOString(), 'auto-recovery-history');
         }
     }
 
-    // Đệ quy lục lọi vào mảng/object con sâu hơn
     for (let key in obj) {
         if (typeof obj[key] === 'object') {
             extractResultsFromPayload(obj[key]);
@@ -227,12 +228,10 @@ function handleSessionTracking(data) {
 }
 
 // ===== AUTO REFRESH TOKEN =====
-// Trạng thái refresh
-let currentRefreshToken = null;  // Sẽ được đọc từ initialMessages khi khởi động
 let tokenRefreshFailCount = 0;
 let isRefreshing = false;
+let totalRefreshAttempts = 0;
 
-// Đọc refreshToken hiện tại từ initialMessages
 function getCurrentRefreshToken() {
     try {
         const info = JSON.parse(initialMessages[0][4].info);
@@ -240,11 +239,52 @@ function getCurrentRefreshToken() {
     } catch (e) { return null; }
 }
 
-// Đọc các thông tin nhận dạng từ initialMessages (userId, username, ipAddress...)
 function getCurrentInfoObj() {
     try {
         return JSON.parse(initialMessages[0][4].info);
     } catch (e) { return null; }
+}
+
+// Dùng https built-in thay vì fetch (tương thích mọi phiên bản Node)
+function httpsPost(url, body) {
+    return new Promise((resolve, reject) => {
+        const parsed = new URL(url);
+        const bodyStr = JSON.stringify(body);
+        const options = {
+            hostname: parsed.hostname,
+            path: parsed.pathname + (parsed.search || ''),
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(bodyStr),
+                'User-Agent': WS_HEADERS['User-Agent'],
+                'Origin': 'https://play.sun.win',
+                'Referer': 'https://play.sun.win/',
+            },
+            timeout: 12000,
+        };
+
+        const req = https.request(options, (res) => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+                if (res.statusCode < 200 || res.statusCode >= 300) {
+                    return reject(new Error(`HTTP ${res.statusCode}`));
+                }
+                try { resolve(JSON.parse(data)); }
+                catch (e) { reject(new Error('JSON parse failed: ' + data.slice(0, 100))); }
+            });
+        });
+
+        req.on('error', reject);
+        req.on('timeout', () => {
+            req.destroy();
+            reject(new Error('timeout 12s'));
+        });
+
+        req.write(bodyStr);
+        req.end();
+    });
 }
 
 async function autoRefreshToken() {
@@ -253,17 +293,17 @@ async function autoRefreshToken() {
         return false;
     }
     isRefreshing = true;
+    totalRefreshAttempts++;
 
     const refreshToken = getCurrentRefreshToken();
     if (!refreshToken) {
-        console.warn('[⚠️ Token] Không tìm thấy refreshToken trong config, bỏ qua.');
+        console.warn('[⚠️ Token] Không tìm thấy refreshToken (trống). Set env REFRESH_TOKEN hoặc điền vào initialMessages.');
         isRefreshing = false;
         return false;
     }
 
-    console.log('[🔑 Token] Đang tự động lấy WS Token mới qua refreshToken...');
+    console.log(`[🔑 Token] Đang lấy WS Token mới (lần thứ ${totalRefreshAttempts})...`);
 
-    // Các endpoint API thử lần lượt
     const endpoints = [
         'https://api.sunwin.qa/api/auth/token',
         'https://api2.sunwin.qa/api/auth/token',
@@ -272,63 +312,39 @@ async function autoRefreshToken() {
         'https://play.sun.win/api/auth/token',
     ];
 
+    const infoObj = getCurrentInfoObj();
+
     for (const url of endpoints) {
         try {
-            const controller = new AbortController();
-            const tid = setTimeout(() => controller.abort(), 12000);
-
-            const infoObj = getCurrentInfoObj();
-
-            const response = await fetch(url, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'User-Agent': WS_HEADERS['User-Agent'],
-                    'Origin': 'https://play.sun.win',
-                    'Referer': 'https://play.sun.win/',
-                },
-                body: JSON.stringify({
-                    refreshToken,
-                    userId: infoObj?.userId,
-                    platform: 4,
-                }),
-                signal: controller.signal,
+            const json = await httpsPost(url, {
+                refreshToken,
+                userId: infoObj?.userId,
+                platform: 4,
             });
 
-            clearTimeout(tid);
-
-            if (!response.ok) {
-                console.warn(`[⚠️ Token] ${url} → HTTP ${response.status}`);
-                continue;
-            }
-
-            const json = await response.json();
             const tokenData = json?.data?.data || json?.data || json;
 
             if (!tokenData?.wsToken) {
-                console.warn(`[⚠️ Token] ${url} → Không có wsToken. Body:`, JSON.stringify(json).slice(0, 150));
+                console.warn(`[⚠️ Token] ${url} → Không có wsToken. Res: ${JSON.stringify(json).slice(0, 150)}`);
                 continue;
             }
 
             const newToken = tokenData.wsToken;
-            const oldToken = WEBSOCKET_URL.split('token=')[1] || '';
+            const oldToken = (WEBSOCKET_URL.split('token=')[1] || '').split('&')[0];
 
             // Cập nhật WEBSOCKET_URL
             WEBSOCKET_URL = `wss://websocket.azhkthg1.net/websocket?token=${newToken}`;
 
-            // Cập nhật initialMessages[0] với token và refreshToken mới
+            // Cập nhật initialMessages
             try {
                 const info = getCurrentInfoObj();
                 info.wsToken = newToken;
                 if (tokenData.refreshToken) info.refreshToken = tokenData.refreshToken;
                 if (tokenData.timestamp)    info.timestamp    = tokenData.timestamp;
                 initialMessages[0][4].info = JSON.stringify(info);
+                if (tokenData.signature) initialMessages[0][4].signature = tokenData.signature;
             } catch (e) {
                 console.warn('[⚠️ Token] Lỗi cập nhật info:', e.message);
-            }
-
-            if (tokenData.signature) {
-                initialMessages[0][4].signature = tokenData.signature;
             }
 
             tokenRefreshFailCount = 0;
@@ -336,31 +352,51 @@ async function autoRefreshToken() {
 
             if (newToken === oldToken) {
                 console.log('[ℹ️ Token] Token chưa đổi, vẫn còn hiệu lực.');
-            } else {
-                console.log(`[✅ Token] Lấy token mới thành công! ...${newToken.slice(-20)}`);
+                return true;
             }
+
+            console.log(`[✅ Token] Token mới thành công! ...${newToken.slice(-20)}`);
+
+            // Force reconnect WS với token mới
+            console.log('[🔄 Token] Reconnect WS với token mới...');
+            isIntentionalClose = true;
+            if (ws) {
+                ws.removeAllListeners();
+                try { ws.terminate(); } catch (_) {}
+            }
+            clearInterval(pingInterval);
+            clearInterval(heartbeatInterval);
+            clearInterval(watchdogInterval);
+            clearTimeout(reconnectTimeout);
+            setTimeout(connectWebSocket, 1500);
+
             return true;
 
         } catch (err) {
-            const reason = err.name === 'AbortError' ? 'timeout 12s' : err.message;
-            console.warn(`[⚠️ Token] ${url} → ${reason}`);
+            console.warn(`[⚠️ Token] ${url} → ${err.message}`);
         }
     }
 
     tokenRefreshFailCount++;
     isRefreshing = false;
-    console.error(`[❌ Token] Tất cả endpoint thất bại (lần ${tokenRefreshFailCount}). Dùng token cũ.`);
+    console.error(`[❌ Token] Tất cả endpoint thất bại (lần ${tokenRefreshFailCount}).`);
     if (tokenRefreshFailCount >= 3) {
-        console.error('[🚨 Token] Token có thể đã chết! Hãy cập nhật thủ công token mới vào code hoặc env WS_TOKEN.');
+        console.error('[🚨 Token] Token có thể đã chết! Hãy cập nhật env WS_TOKEN + REFRESH_TOKEN mới.');
     }
     return false;
 }
+
+// Định kỳ refresh token mỗi 25 phút
+setInterval(async () => {
+    console.log('[⏰ Token] Định kỳ refresh token...');
+    await autoRefreshToken();
+}, 25 * 60 * 1000);
 
 // ===== WEBSOCKET MANAGER =====
 async function connectWebSocket() {
     isIntentionalClose = false;
     clearTimeout(reconnectTimeout);
-    
+
     if (ws) {
         ws.removeAllListeners();
         try { ws.terminate(); } catch (_) {}
@@ -368,7 +404,7 @@ async function connectWebSocket() {
 
     reconnectAttempts++;
 
-    // Tự động refresh token: lần đầu tiên hoặc mỗi 3 lần reconnect liên tiếp
+    // Refresh token: lần đầu tiên, hoặc mỗi 3 lần reconnect liên tiếp
     if (reconnectAttempts === 1 || reconnectAttempts % 3 === 0) {
         await autoRefreshToken();
     }
@@ -384,7 +420,7 @@ async function connectWebSocket() {
     }
 
     ws.on('open', () => {
-        console.log('[✅] Kết nối thành công!');
+        console.log('[✅] Kết nối WS thành công!');
         wsConnectedAt = Date.now();
         lastMessageTime = Date.now();
         reconnectAttempts = 0;
@@ -407,7 +443,7 @@ async function connectWebSocket() {
             const now = Date.now();
             const silentSecs = lastMessageTime ? Math.floor((now - lastMessageTime) / 1000) : 0;
             if (lastMessageTime && silentSecs > 90) {
-                console.log(`[🚨 WATCHDOG] Im lặng ${silentSecs}s (${messageCount} msg). Có thể token chết → Reconnect!`);
+                console.log(`[🚨 WATCHDOG] Im lặng ${silentSecs}s (${messageCount} msg). Reconnect!`);
                 isIntentionalClose = true;
                 ws.terminate();
                 scheduleReconnect();
@@ -419,7 +455,7 @@ async function connectWebSocket() {
         try {
             lastMessageTime = Date.now();
             messageCount++;
-            
+
             let rawData;
             if (Buffer.isBuffer(message) || isBinary) {
                 rawData = message.toString('utf8');
@@ -432,17 +468,16 @@ async function connectWebSocket() {
                 if (firstBracketIndex !== -1) {
                     rawData = rawData.substring(firstBracketIndex);
                 } else {
-                    return; 
+                    return;
                 }
             }
 
             const data = JSON.parse(rawData);
-            
-            // 🛡️ KÍCH HOẠT VŨ KHÍ: Quét trọn vẹn toàn bộ cục data để nhặt kết quả lọt khe
+
             extractResultsFromPayload(data);
 
             if (!Array.isArray(data) || typeof data[1] !== 'object' || data[1] === null) return;
-            
+
             const payload = data[1];
             handleSessionTracking(payload);
 
@@ -467,12 +502,13 @@ function cleanupAndReconnect() {
     clearInterval(pingInterval);
     clearInterval(heartbeatInterval);
     clearInterval(watchdogInterval);
-    scheduleReconnect();
+    if (!isIntentionalClose || reconnectAttempts > 0) {
+        scheduleReconnect();
+    }
 }
 
 function scheduleReconnect() {
     clearTimeout(reconnectTimeout);
-    // Tăng dần delay để tránh spam khi token chết: 2s → 5s → 10s → 15s
     let delay;
     if (reconnectAttempts <= 1)      delay = 2000;
     else if (reconnectAttempts <= 3) delay = 5000;
@@ -506,27 +542,31 @@ app.get('/api/taixiu/history', (req, res) => {
 
 app.get('/api/health', (req, res) => res.json({
     status: 'online',
-    ws_state: ws ? ['CONNECTING','OPEN','CLOSING','CLOSED'][ws.readyState] : 'null',
+    ws_state: ws ? ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'][ws.readyState] : 'null',
     uptime_secs: Math.floor(process.uptime()),
     messages_received: messageCount,
     reconnect_attempts: reconnectAttempts,
+    total_refresh_attempts: totalRefreshAttempts,
     token_refresh_fails: tokenRefreshFailCount,
     last_known_session: lastKnownSessionId,
     silent_secs: lastMessageTime ? Math.floor((Date.now() - lastMessageTime) / 1000) : null,
 }));
 
-// Gọi URL này để force refresh token ngay lập tức (không cần restart)
 app.get('/api/refresh-token', async (req, res) => {
     console.log('[🔑] Force refresh token theo yêu cầu HTTP...');
     const ok = await autoRefreshToken();
-    res.json({ success: ok, message: ok ? '✅ Token mới đã cập nhật!' : '❌ Refresh thất bại, xem log Render.' });
+    res.json({
+        success: ok,
+        message: ok ? '✅ Token mới đã cập nhật và WS sẽ reconnect!' : '❌ Refresh thất bại, xem log.'
+    });
 });
 
 // ===== START SERVER =====
 app.listen(PORT, '0.0.0.0', async () => {
-    console.log(`\n=== 🚀 KHỞI ĐỘNG CỖ MÁY CRAWL TÀI XỈU (BẢN TỐI THƯỢNG - 0 LỌT KHE) ===`);
+    console.log(`\n=== 🚀 KHỞI ĐỘNG CỖ MÁY CRAWL TÀI XỈU ===`);
     console.log(`[Port] ${PORT}`);
-    
+    console.log(`[Self URL] ${SELF_URL}`);
+
     await connectMongoDB();
     startKeepAlive();
     connectWebSocket();
@@ -534,6 +574,7 @@ app.listen(PORT, '0.0.0.0', async () => {
 
 process.on('SIGINT', () => {
     console.log('\n[🛑] Tắt máy...');
+    isIntentionalClose = true;
     if (ws) ws.terminate();
     process.exit(0);
 });
